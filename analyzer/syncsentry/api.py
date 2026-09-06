@@ -51,9 +51,17 @@ def healthz() -> dict:
 
 
 @app.post("/v1/fix")
-async def fix(video: UploadFile = File(...), captions: UploadFile | None = File(None)) -> dict:
+async def fix(video: UploadFile = File(...), captions: UploadFile | None = File(None),
+               av_min_confidence: float = 0.3) -> dict:
     """Upload a video (and optionally its captions), get back a short report
     plus download links for the corrected files.
+
+    `av_min_confidence` (default 0.3, matching the CLI): below this
+    cross-correlation confidence, the A/V offset is reported as
+    undetermined rather than "detected" -- real talking-head/dialogue
+    content routinely produces confident-looking but spurious global
+    offsets from this detector (see docs/RESEARCH.md section 1b); without
+    this gate the pipeline would confidently "fix" noise.
     """
     job_id = uuid.uuid4().hex[:12]
     job_dir = _RUNS_DIR / job_id
@@ -70,7 +78,8 @@ async def fix(video: UploadFile = File(...), captions: UploadFile | None = File(
             shutil.copyfileobj(captions.file, f)
 
     try:
-        summary = run_fix_pipeline(video_path, job_dir / "out", captions_path=captions_path)
+        summary = run_fix_pipeline(video_path, job_dir / "out", captions_path=captions_path,
+                                    av_min_confidence=av_min_confidence)
     except Exception as exc:  # noqa: BLE001 -- surface the real error to the caller
         raise HTTPException(status_code=422, detail=f"Processing failed: {exc}") from exc
 

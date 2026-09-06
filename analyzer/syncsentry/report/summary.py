@@ -44,7 +44,19 @@ class SyncFixSummary:
         ]
         for issue in self.issues:
             if not issue.had_issue:
-                lines.append(f"{issue.name:<12}: in sync ({issue.detected_offset_ms:+.0f}ms, below threshold)")
+                if issue.note:
+                    # Not a confirmed "in sync" -- we skipped fixing for a
+                    # stated reason (undetermined confidence, no speech
+                    # onsets to compare against, etc.). Don't claim
+                    # certainty we don't have. (Previously this note was
+                    # silently dropped, and detected_offset_ms=None -- the
+                    # "no matching speech onsets" case -- crashed here on
+                    # NoneType.__format__.)
+                    lines.append(f"{issue.name:<12}: not fixed -- {issue.note}")
+                elif issue.detected_offset_ms is not None:
+                    lines.append(f"{issue.name:<12}: in sync ({issue.detected_offset_ms:+.0f}ms, below threshold)")
+                else:
+                    lines.append(f"{issue.name:<12}: in sync")
                 continue
 
             status = "FIXED" if issue.fixed else "NOT FIXED"

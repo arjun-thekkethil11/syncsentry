@@ -61,6 +61,7 @@ def cmd_fix(args: argparse.Namespace) -> None:
         captions_path=args.captions,
         av_threshold_ms=args.av_threshold_ms,
         caption_threshold_ms=args.caption_threshold_ms,
+        av_min_confidence=args.av_min_confidence,
     )
     print(summary.to_text())
 
@@ -146,6 +147,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out-dir", required=True)
     p.add_argument("--av-threshold-ms", type=float, default=40.0)
     p.add_argument("--caption-threshold-ms", type=float, default=80.0)
+    p.add_argument("--av-min-confidence", type=float, default=0.3,
+                    help="Below this cross-correlation confidence, treat the A/V offset as "
+                         "undetermined rather than 'detected' -- avoids 'fixing' noise on real "
+                         "talking-head content (see docs/RESEARCH.md section 1b)")
     p.set_defaults(func=cmd_fix)
 
     p = sub.add_parser("classify-drift", help="Classify a title's sync-drift pattern (constant/drift/intermittent)")
