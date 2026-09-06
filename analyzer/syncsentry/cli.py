@@ -1,0 +1,106 @@
+"""SyncSentry command-line interface.
+
+    syncsentry gen-fixture   --out fixtures/x.mkv --offset-ms 150
+    syncsentry detect-offset --video fixtures/x.mkv
+    syncsentry check-captions --video fixtures/x.mkv --captions fixtures/x.vtt
+    syncsentry benchmark      --out-dir benchmark/results
+"""
+from __future__ import annotations
+
+import argparse
+import dataclasses
+import json
+import sys
+from pathlib import Path
+
+from syncsentry.captions.drift_check import check_caption_drift
+from syncsentry.detectors.coarse_xcorr import estimate_av_offset
+from syncsentry.synth.fixture_gen import FixtureSpec, generate_captions, generate_fixture
+
+
+def _print_json(obj) -> None:
+    if dataclasses.is_dataclass(obj):
+        obj = dataclasses.asdict(obj)
+    print(json.dumps(obj, indent=2, default=str))
+
+
+def cmd_gen_fixture(args: argparse.Namespace) -> None:
+    spec = FixtureSpec(
+        duration_s=args.duration, period_s=args.period, pulse_ms=args.pulse_ms,
+        offset_ms=args.offset_ms, fps=args.fps, sr=args.sr,
+    )
+    out = Path(args.out)
+    video_path = generate_fixture(out, spec)
+    print(f"wrote {video_path}")
+    if args.captions:
+        vtt_path = generate_captions(
+            out.with_suffix(".vtt"), spec, caption_offset_ms=args.caption_offset_ms,
+        )
+        print(f"wrote {vtt_path}")
+
+
+def cmd_detect_offset(args: argparse.Namespace) -> None:
+    estimate = estimate_av_offset(args.video, search_window_ms=args.search_window_ms)
+    _print_json(estimate)
+
+
+def cmd_check_captions(args: argparse.Namespace) -> None:
+    report = check_caption_drift(args.video, args.captions)
+    _print_json(report)
+
+
+def cmd_benchmark(args: argparse.Namespace) -> None:
+    from syncsentry.report.benchmark import run_av_offset_benchmark, run_caption_drift_benchmark
+
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    av_results = run_av_offset_benchmark(out_dir)
+    cap_results = run_caption_drift_benchmark(out_dir)
+
+    print(f"A/V offset benchmark: {len(av_results)} cases -> {out_dir}")
+    print(f"Caption drift benchmark: {len(cap_results)} cases -> {out_dir}")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="syncsentry")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p = sub.add_parser("gen-fixture", help="Generate a synthetic AV fixture with a known offset")
+    p.add_argument("--out", required=True, help="Output .mkv path")
+    p.add_argument("--duration", type=float, default=10.0)
+    p.add_argument("--period", type=float, default=1.0)
+    p.add_argument("--pulse-ms", type=float, default=80.0)
+    p.add_argument("--offset-ms", type=float, default=0.0, help="Injected A/V offset (audio vs video)")
+    p.add_argument("--fps", type=float, default=25.0)
+    p.add_argument("--sr", type=int, default=48000)
+    p.add_argument("--captions", action="store_true", help="Also generate a matching .vtt file")
+    p.add_argument("--caption-offset-ms", type=float, default=0.0)
+    p.set_defaults(func=cmd_gen_fixture)
+
+    p = sub.add_parser("detect-offset", help="Estimate global A/V offset via envelope cross-correlation")
+    p.add_argument("--video", required=True)
+    p.add_argument("--search-window-ms", type=float, default=500.0)
+    p.set_defaults(func=cmd_detect_offset)
+
+    p = sub.add_parser("check-captions", help="Compare WebVTT cue timing against detected audio onsets")
+    p.add_argument("--video", required=True)
+    p.add_argument("--captions", required=True)
+    p.set_defaults(func=cmd_check_captions)
+
+    p = sub.add_parser("benchmark", help="Run the full offset-recovery benchmark sweep and write a report")
+    p.add_argument("--out-dir", default="benchmark/results")
+    p.set_defaults(func=cmd_benchmark)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    args.func(args)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

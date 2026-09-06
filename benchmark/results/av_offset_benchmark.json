@@ -1,0 +1,149 @@
+[
+  {
+    "injected_ms": -900,
+    "estimated_ms": -900.0,
+    "error_ms": 0.0,
+    "confidence": 0.827,
+    "direction": "audio_leads"
+  },
+  {
+    "injected_ms": -700,
+    "estimated_ms": -700.0,
+    "error_ms": 0.0,
+    "confidence": 0.827,
+    "direction": "audio_leads"
+  },
+  {
+    "injected_ms": -500,
+    "estimated_ms": -500.0,
+    "error_ms": 0.0,
+    "confidence": 0.828,
+    "direction": "audio_leads"
+  },
+  {
+    "injected_ms": -300,
+    "estimated_ms": -300.0,
+    "error_ms": 0.0,
+    "confidence": 0.829,
+    "direction": "audio_leads"
+  },
+  {
+    "injected_ms": -200,
+    "estimated_ms": -200.0,
+    "error_ms": 0.0,
+    "confidence": 0.829,
+    "direction": "audio_leads"
+  },
+  {
+    "injected_ms": -150,
+    "estimated_ms": -150.0,
+    "error_ms": 0.0,
+    "confidence": 0.829,
+    "direction": "audio_leads"
+  },
+  {
+    "injected_ms": -100,
+    "estimated_ms": -100.0,
+    "error_ms": 0.0,
+    "confidence": 0.829,
+    "direction": "audio_leads"
+  },
+  {
+    "injected_ms": -60,
+    "estimated_ms": -60.0,
+    "error_ms": 0.0,
+    "confidence": 0.864,
+    "direction": "audio_leads"
+  },
+  {
+    "injected_ms": -30,
+    "estimated_ms": -30.0,
+    "error_ms": 0.0,
+    "confidence": 0.925,
+    "direction": "in_sync"
+  },
+  {
+    "injected_ms": -10,
+    "estimated_ms": -10.0,
+    "error_ms": 0.0,
+    "confidence": 0.964,
+    "direction": "in_sync"
+  },
+  {
+    "injected_ms": 0,
+    "estimated_ms": 0.0,
+    "error_ms": 0.0,
+    "confidence": 0.976,
+    "direction": "in_sync"
+  },
+  {
+    "injected_ms": 10,
+    "estimated_ms": 10.0,
+    "error_ms": 0.0,
+    "confidence": 0.966,
+    "direction": "in_sync"
+  },
+  {
+    "injected_ms": 30,
+    "estimated_ms": 30.0,
+    "error_ms": 0.0,
+    "confidence": 0.959,
+    "direction": "in_sync"
+  },
+  {
+    "injected_ms": 60,
+    "estimated_ms": 60.0,
+    "error_ms": 0.0,
+    "confidence": 0.959,
+    "direction": "audio_lags"
+  },
+  {
+    "injected_ms": 100,
+    "estimated_ms": 100.0,
+    "error_ms": 0.0,
+    "confidence": 0.958,
+    "direction": "audio_lags"
+  },
+  {
+    "injected_ms": 150,
+    "estimated_ms": 150.0,
+    "error_ms": 0.0,
+    "confidence": 0.958,
+    "direction": "audio_lags"
+  },
+  {
+    "injected_ms": 200,
+    "estimated_ms": 200.0,
+    "error_ms": 0.0,
+    "confidence": 0.958,
+    "direction": "audio_lags"
+  },
+  {
+    "injected_ms": 300,
+    "estimated_ms": 300.0,
+    "error_ms": 0.0,
+    "confidence": 0.958,
+    "direction": "audio_lags"
+  },
+  {
+    "injected_ms": 500,
+    "estimated_ms": 500.0,
+    "error_ms": 0.0,
+    "confidence": 0.957,
+    "direction": "audio_lags"
+  },
+  {
+    "injected_ms": 700,
+    "estimated_ms": 700.0,
+    "error_ms": 0.0,
+    "confidence": 0.956,
+    "direction": "audio_lags"
+  },
+  {
+    "injected_ms": 900,
+    "estimated_ms": 900.0,
+    "error_ms": 0.0,
+    "confidence": 0.955,
+    "direction": "audio_lags"
+  }
+]

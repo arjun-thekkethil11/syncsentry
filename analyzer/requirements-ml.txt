@@ -1,0 +1,8 @@
+# Milestone 3+ (lip-sync embedding model, face/dialogue-scene detection).
+# Installed separately from requirements-core.txt to keep the M1/M2 signal-
+# processing environment fast to set up and CI-friendly.
+torch>=2.3
+torchaudio>=2.3
+torchvision>=0.18
+scenedetect>=0.6.4
+mediapipe>=0.10.14
