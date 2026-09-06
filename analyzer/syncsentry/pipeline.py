@@ -27,12 +27,18 @@ and robust to changes in how the individual fixers work.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from syncsentry.captions.drift_check import check_caption_drift
 from syncsentry.detectors.coarse_xcorr import estimate_av_offset
 from syncsentry.fixer.av_fix import fix_av_offset
 from syncsentry.fixer.caption_fix import fix_caption_offset
+from syncsentry.lipsync.syncnet_offset import (
+    DEFAULT_SYNCNET_MIN_CONFIDENCE,
+    SyncNetUnavailable,
+    estimate_syncnet_offset,
+)
 from syncsentry.report.summary import IssueSummary, SyncFixSummary
 
 DEFAULT_AV_THRESHOLD_MS = 40.0  # ~1 frame at 25fps; tune per deployment
@@ -49,11 +55,49 @@ DEFAULT_CAPTION_THRESHOLD_MS = 80.0
 DEFAULT_AV_MIN_CONFIDENCE = 0.3
 
 
+@dataclass
+class _AVDetection:
+    offset_ms: float
+    confidence: float
+    direction: str
+    min_confidence: float  # threshold to compare `confidence` against -- differs by method
+    method: str  # "coarse" | "syncnet"
+    fallback_note: str | None  # set when --use-syncnet was requested but couldn't run
+
+
+def _detect_av_offset(video_path: str, av_threshold_ms: float, use_syncnet: bool,
+                       syncnet_min_confidence: float, av_min_confidence: float) -> _AVDetection:
+    """Picks which detector actually runs. SyncNet (M3c, see
+    docs/RESEARCH.md section 1e) is far more accurate on real talking-head
+    content than the coarse detector, but takes ~minutes per video (real
+    face detection/tracking + a CNN) versus ~seconds -- so it's opt-in
+    (`use_syncnet=True`), not the silent default. Falls back to the coarse
+    detector (with a note explaining why) if SyncNet isn't fetched or finds
+    no trackable face.
+    """
+    fallback_note = None
+    if use_syncnet:
+        try:
+            est = estimate_syncnet_offset(video_path, in_sync_threshold_ms=av_threshold_ms)
+            return _AVDetection(est.offset_ms, est.confidence, est.direction,
+                                 syncnet_min_confidence, "syncnet", None)
+        except SyncNetUnavailable as exc:
+            fallback_note = f"--use-syncnet requested but unavailable ({exc}); used the coarse detector instead"
+        except ValueError as exc:
+            fallback_note = f"--use-syncnet found no trackable face ({exc}); used the coarse detector instead"
+
+    coarse = estimate_av_offset(video_path, in_sync_threshold_ms=av_threshold_ms)
+    return _AVDetection(coarse.offset_ms, coarse.confidence, coarse.direction,
+                         av_min_confidence, "coarse", fallback_note)
+
+
 def run_fix_pipeline(video_path: str | Path, out_dir: str | Path,
                       captions_path: str | Path | None = None,
                       av_threshold_ms: float = DEFAULT_AV_THRESHOLD_MS,
                       caption_threshold_ms: float = DEFAULT_CAPTION_THRESHOLD_MS,
-                      av_min_confidence: float = DEFAULT_AV_MIN_CONFIDENCE) -> SyncFixSummary:
+                      av_min_confidence: float = DEFAULT_AV_MIN_CONFIDENCE,
+                      use_syncnet: bool = False,
+                      syncnet_min_confidence: float = DEFAULT_SYNCNET_MIN_CONFIDENCE) -> SyncFixSummary:
     video_path = Path(video_path)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -61,38 +105,43 @@ def run_fix_pipeline(video_path: str | Path, out_dir: str | Path,
     summary = SyncFixSummary(asset_name=video_path.name)
 
     # --- Step 1-3: A/V sync ---
-    av_estimate = estimate_av_offset(str(video_path), in_sync_threshold_ms=av_threshold_ms)
+    det = _detect_av_offset(str(video_path), av_threshold_ms, use_syncnet,
+                             syncnet_min_confidence, av_min_confidence)
     corrected_video_path = out_dir / f"{video_path.stem}.corrected{video_path.suffix}"
+    method_tag = "" if det.method == "coarse" else " [syncnet]"
 
-    if av_estimate.confidence < av_min_confidence:
+    if det.confidence < det.min_confidence:
         # Not "in sync below threshold" -- we genuinely can't tell. Treating
         # this as "no issue" (rather than guessing a fix from noise) is the
         # honest answer; see docs/RESEARCH.md section 1b for why this
         # triggers on real dialogue/talking-head content specifically.
         corrected_video_path.write_bytes(video_path.read_bytes())
+        note = (f"low-confidence detection{method_tag}: raw estimate {det.offset_ms:+.0f}ms "
+                f"({det.direction}), confidence {det.confidence:.2f} (threshold {det.min_confidence:.2f}) "
+                f"-- too low to trust; not applied automatically. If your own check agrees with the "
+                f"direction, re-run with a lower confidence threshold to force it, but treat the "
+                f"result as unverified")
+        if det.fallback_note:
+            note = f"{det.fallback_note}. {note}"
         summary.issues.append(IssueSummary(
-            name="A/V sync", had_issue=False, detected_offset_ms=av_estimate.offset_ms,
-            fixed=False, residual_offset_ms=None,
-            note=(f"low-confidence detection: raw estimate {av_estimate.offset_ms:+.0f}ms "
-                  f"({av_estimate.direction}), confidence {av_estimate.confidence:.2f} -- too low "
-                  f"to trust on this content (common on real talking-head footage); not applied "
-                  f"automatically. If your own check agrees with the direction, re-run with "
-                  f"--av-min-confidence {max(0.0, av_estimate.confidence - 0.05):.2f} to force it, "
-                  f"but treat the result as unverified"),
+            name="A/V sync", had_issue=False, detected_offset_ms=det.offset_ms,
+            fixed=False, residual_offset_ms=None, note=note,
         ))
-    elif av_estimate.direction == "in_sync":
+    elif det.direction == "in_sync":
         corrected_video_path.write_bytes(video_path.read_bytes())
         summary.issues.append(IssueSummary(
-            name="A/V sync", had_issue=False, detected_offset_ms=av_estimate.offset_ms,
-            fixed=False, residual_offset_ms=None,
+            name="A/V sync", had_issue=False, detected_offset_ms=det.offset_ms,
+            fixed=False, residual_offset_ms=None, note=det.fallback_note,
         ))
     else:
-        fix_av_offset(video_path, corrected_video_path, av_estimate.offset_ms)
-        residual = estimate_av_offset(str(corrected_video_path), in_sync_threshold_ms=av_threshold_ms)
+        fix_av_offset(video_path, corrected_video_path, det.offset_ms)
+        residual_det = _detect_av_offset(str(corrected_video_path), av_threshold_ms, use_syncnet,
+                                          syncnet_min_confidence, av_min_confidence)
         summary.issues.append(IssueSummary(
-            name="A/V sync", had_issue=True, detected_offset_ms=av_estimate.offset_ms,
-            fixed=(residual.confidence >= av_min_confidence and abs(residual.offset_ms) <= av_threshold_ms),
-            residual_offset_ms=residual.offset_ms,
+            name="A/V sync", had_issue=True, detected_offset_ms=det.offset_ms,
+            fixed=(residual_det.confidence >= residual_det.min_confidence
+                   and abs(residual_det.offset_ms) <= av_threshold_ms),
+            residual_offset_ms=residual_det.offset_ms, note=det.fallback_note,
         ))
 
     summary.output_files["corrected_video"] = str(corrected_video_path)

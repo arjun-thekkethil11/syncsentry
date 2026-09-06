@@ -64,11 +64,22 @@ implemented and tested, not aspirational scope.
       negative-result test (`test_mouth_offset_real.py`); real evidence
       that M3c needs a learned model, not a smaller ROI. 60 tests total.
       See `docs/RESEARCH.md` §1d.
-- [ ] **M3c -- Learned per-scene estimator (deferred until there's a way to
-      validate it against real, ideally annotated, drift).**
-      Swap the per-window estimator for a pretrained SyncNet-family model,
-      restricted to M3b's real dialogue scenes; wire Silero-VAD into the
-      caption checker itself for real speech.
+- [x] **M3c -- Learned estimator: pretrained SyncNet, wired in as an opt-in tier.**
+      `syncsentry fix --use-syncnet` (`lipsync/syncnet_offset.py`) wraps
+      `joonson/syncnet_python` (MIT, vendored via
+      `scripts/fetch_syncnet.sh`, never committed) as an external tool
+      rather than reimplemented. Validated with the same known-injected-offset
+      methodology that falsified M3b.5: recovers 0/+150/-200/+300ms injected
+      offsets on the real clip within ~1 frame (40ms) across 3 face tracks
+      each time, with consistent confidence (~4-8.5) -- unlike every prior
+      attempt. See `docs/RESEARCH.md` §1e. Not the default: each run takes
+      minutes (real face tracking + a CNN, CPU), so the fast coarse
+      detector + confidence gate (M2.5/M3b) stays the default path; SyncNet
+      is opt-in for when accuracy matters more than latency. 62 tests total
+      (2 more real-content ones, auto-skip in CI). *Remaining, smaller
+      piece of the original M3c scope:* wiring Silero-VAD into the caption
+      checker itself for real speech (currently still a synthetic-pulse
+      onset picker, see `docs/RESEARCH.md` §4) -- deferred, not blocking.
 - [ ] **M4 -- Go orchestrator: catalog batch runner.** Job queue + asset
       state (Postgres), scheduling across a catalog, calling the Python
       API (M2.6) as a worker.
