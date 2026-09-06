@@ -2,36 +2,17 @@
 
 **Research-grounded A/V and caption synchronization drift detection for OTT pipelines.**
 
-Production caption/VOD tooling at most streaming companies (including the
-tooling this project's author built and shipped at Fox for vertical-caption
-sync and frame-accurate VOD/iVOD cutting) checks synchronization with
-heuristics: waveform peaks vs. frame PTS, a fixed tolerance, manual QC on
-outliers. That's fast and explainable, but it treats every sync problem as
-"one global offset," when the current research literature (DiVAS, CVPR 2024;
-ModEFormer, ICASSP 2023; UniSync, 2025) shows sync drift actually comes in
-several distinct, differently-remediated flavors: constant offset,
-progressive drift-early/late, and intermittent offset -- and that catching
-them reliably requires per-scene, learned detection, not just a single
-title-level number.
+Production caption/VOD tooling checks sync with heuristics: waveform peaks
+vs. frame PTS, a fixed tolerance, manual QC on outliers. That treats every
+sync bug as "one global offset." Current research (DiVAS, CVPR 2024;
+ModEFormer, ICASSP 2023; UniSync, 2025) shows drift actually comes in
+distinct flavors -- constant, drift-early/late, intermittent -- that need
+per-scene, learned detection to tell apart.
 
-SyncSentry is an from-scratch, benchmarked implementation of that idea,
-built up in stages: a rigorous, model-free baseline first (with an honest
-accounting of its limitations), then a learned per-scene layer on top of it.
-See [`docs/RESEARCH.md`](docs/RESEARCH.md) for the literature this is built
-on and exactly which design decision each paper drove, and
+SyncSentry builds that up in stages: a benchmarked, model-free baseline
+first (honest about its limits), then a learned per-scene layer on top.
+See [`docs/RESEARCH.md`](docs/RESEARCH.md) for the literature and
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for build status.
-
-## Why this problem
-
-A/V and caption sync bugs are one of the most common, most visible quality
-defects in OTT delivery -- and one of the hardest to catch at catalog scale,
-because "global offset" heuristics can't tell "this whole title is 80ms out"
-apart from "this title drifts progressively worse from minute 40 onward."
-Those are different bugs with different root causes (mux error vs. VFR
-timeline drift) and different fixes. This project's design goal is a
-detection stack that can tell them apart automatically, at catalog scale,
-with results that are validated against synthetic ground truth rather than
-eyeballed.
 
 ## Architecture
 
@@ -40,191 +21,90 @@ flowchart LR
     subgraph Input
         V[VOD asset: video + audio + captions]
     end
-
-    subgraph "Tier 1 -- coarse (implemented)"
+    subgraph "Tier 1 -- coarse (done)"
         A[Audio RMS envelope] --> X[Cross-correlation]
         B[Video brightness envelope] --> X
-        X --> O1[Global A/V offset estimate]
-        C[WebVTT cues] --> D[Caption-vs-speech drift check]
+        X --> O1[Global A/V offset]
+        C[WebVTT cues] --> D[Caption vs. speech drift]
         E[Audio onset / VAD] --> D
-        D --> O2[Per-cue caption drift report]
     end
-
-    subgraph "Tier 2 -- learned per-scene (dialogue-scene detection done; embedding model in progress)"
-        F[Dialogue scene detection: face + VAD overlap] --> G[SyncNet-family embedding model]
-        G --> H[Per-scene offset + confidence]
-        H --> I[RANSAC title-level regression]
-        I --> O3[Drift type: constant / drift-early / drift-late / intermittent]
+    subgraph "Tier 2 -- learned per-scene (scene detection done; estimator in progress)"
+        F[Dialogue scenes: face + VAD overlap] --> G[SyncNet-family embedding]
+        G --> H[Per-scene offset] --> I[RANSAC regression] --> O3[Drift type]
     end
-
-    V --> A
-    V --> B
-    V --> C
-    V --> E
-    V --> F
+    V --> A & B & C & E & F
     O1 --> O3
 ```
 
-**Tier 1** (`analyzer/`, Python) is fully implemented and benchmarked below.
-**Tier 2** and the Go orchestration/API service (`services/orchestrator/`)
-are in progress -- see [`docs/ROADMAP.md`](docs/ROADMAP.md).
+Tier 1 (`analyzer/`, Python) is fully implemented and benchmarked below.
+Tier 2's scene detection is real and validated; the learned estimator is
+still in progress (M3c). The Go orchestrator (`services/orchestrator/`) is
+scaffolded for catalog-scale batch runs (M4).
 
 ## Benchmark results
 
-All results below are reproducible with `syncsentry benchmark` -- no
-restricted-access datasets required. Methodology: inject a known offset into
-synthetic, sample-accurate ground-truth fixtures (`syncsentry/synth/fixture_gen.py`)
-and measure recovery error, the same evaluation approach used by DiVAS/SyncNet
-in the literature (see [`docs/RESEARCH.md`](docs/RESEARCH.md)).
+Reproducible with `syncsentry benchmark` -- synthetic, sample-accurate
+ground truth, no restricted-access datasets.
 
-### Global A/V offset recovery (coarse cross-correlation detector)
+**A/V offset recovery:** 0.00ms mean error across a -900ms..+900ms sweep.
 
-![A/V offset recovery accuracy](benchmark/results/av_offset_benchmark.png)
+| Injected (ms) | Estimated (ms) | Confidence | Direction |
+|---:|---:|---:|:---|
+| -500 | -500.0 | 0.828 | audio_leads |
+| -30 | -30.0 | 0.925 | in_sync |
+| 0 | 0.0 | 0.976 | in_sync |
+| 100 | 100.0 | 0.958 | audio_lags |
+| 900 | 900.0 | 0.955 | audio_lags |
 
-| Injected (ms) | Estimated (ms) | Error (ms) | Confidence | Direction |
-|---:|---:|---:|---:|:---|
-| -900 | -900.0 | 0.0 | 0.827 | audio_leads |
-| -500 | -500.0 | 0.0 | 0.828 | audio_leads |
-| -200 | -200.0 | 0.0 | 0.829 | audio_leads |
-| -100 | -100.0 | 0.0 | 0.829 | audio_leads |
-| -30 | -30.0 | 0.0 | 0.925 | in_sync |
-| 0 | 0.0 | 0.0 | 0.976 | in_sync |
-| 30 | 30.0 | 0.0 | 0.959 | in_sync |
-| 100 | 100.0 | 0.0 | 0.958 | audio_lags |
-| 200 | 200.0 | 0.0 | 0.958 | audio_lags |
-| 500 | 500.0 | 0.0 | 0.957 | audio_lags |
-| 900 | 900.0 | 0.0 | 0.955 | audio_lags |
+*(Full sweep: [`benchmark/results/av_offset_benchmark.md`](benchmark/results/av_offset_benchmark.md).
+Known limitation: periodic-signal cross-correlation is ambiguous past `±period/2` -- found via the benchmark itself, now a pinned regression test. Details in [`docs/RESEARCH.md`](docs/RESEARCH.md).)*
 
-*(Full 21-point sweep in [`benchmark/results/av_offset_benchmark.md`](benchmark/results/av_offset_benchmark.md).)*
-
-**Known limitation:** periodic-signal cross-correlation is only unambiguous
-up to `± period/2` -- this was discovered *by the benchmark itself* (a
--500ms injection aliased to +500ms on a 1-second-period fixture) and is now
-a pinned regression test
-(`tests/test_coarse_detector.py::test_periodic_ambiguity_boundary_is_documented`)
-rather than a silent gap. Details in [`docs/RESEARCH.md`](docs/RESEARCH.md#3-coarse-model-free-detection-is-a-legitimate-first-tier-with-a-known-limitation).
-
-### Caption-vs-speech drift recovery
-
-| Injected caption offset (ms) | Recovered median (ms) | Matched cues | Flagged cues |
-|---:|---:|---:|---:|
-| -300 | -300.0 | 9 | 9 |
-| -80 | -80.0 | 9 | 8 |
-| -30 | -30.0 | 9 | 0 |
-| 0 | 0.0 | 9 | 0 |
-| 30 | 30.0 | 9 | 0 |
-| 80 | 80.0 | 9 | 9 |
-| 300 | 300.0 | 9 | 9 |
-
-*(Full sweep in [`benchmark/results/caption_drift_benchmark.md`](benchmark/results/caption_drift_benchmark.md).
-Caption drift is checked against detected audio onsets directly, independent
-of the video track -- see [`docs/RESEARCH.md`](docs/RESEARCH.md#4-caption-drift-is-a-distinct-problem-from-pictureaudio-drift)
-for why that's a deliberate, distinct check from the A/V offset detector.)*
+**Caption-vs-speech drift recovery:** exact median recovery across an
+11-point sweep, checked independently of the video track. Full sweep:
+[`benchmark/results/caption_drift_benchmark.md`](benchmark/results/caption_drift_benchmark.md).
 
 ## Detect + fix + report
 
-This is the actual end-user surface: point SyncSentry at a video (and
-optionally its captions), and it detects any A/V offset and/or caption
-drift, **corrects it**, re-measures the result to prove the fix worked, and
-writes a short report -- not a wall of internal metrics.
+The actual end-user surface: point SyncSentry at a video (+ optional
+captions), it detects, **fixes**, re-measures the result to prove the fix
+worked, and writes a short report.
 
 ```bash
 syncsentry fix --video asset.mkv --captions asset.vtt --out-dir out/
 ```
-
 ```
-SyncSentry Report
-Asset: asset.mkv
-------------------------------------------------------------
 A/V sync    : detected +180ms -> FIXED (residual +0.0ms)
 Captions    : detected -110ms -> FIXED (residual +0.0ms)
-------------------------------------------------------------
 Overall: ✅ all issues resolved
-Output files:
-  corrected_video: out/asset.corrected.mkv
-  corrected_captions: out/asset.corrected.vtt
 ```
 
-How the fix actually works (both verified against our own detectors, not
-just "ran without error" -- see `analyzer/tests/test_fixer.py`):
+- **A/V fix** re-encodes just the audio track (trim/pad real samples) --
+  not a metadata-only `-itsoffset` remux, which was verified to do nothing
+  for consumers that read raw decoded samples ([`av_fix.py`](analyzer/syncsentry/fixer/av_fix.py)).
+- **Every step re-measures the actual output** rather than composing
+  corrections algebraically -- this is what caught the bugs below.
+- **A confidence gate** skips fixing when the detector can't reliably tell
+  if there's a real issue (common on real talking-head content -- found via
+  a real bug report, see [`docs/RESEARCH.md`](docs/RESEARCH.md)), instead of
+  confidently "fixing" noise.
 
-- **A/V offset:** re-encodes just the audio track, trimming (audio lagged)
-  or padding with real silence (audio led) at the start -- see
-  [`syncsentry/fixer/av_fix.py`](analyzer/syncsentry/fixer/av_fix.py) for why
-  this isn't done via a plain `-itsoffset` remux (metadata-only timestamp
-  tricks don't survive stream copy and don't fix anything for consumers that
-  read raw frame/sample sequences, which is exactly what this project's own
-  detectors do -- found the hard way, see `docs/RESEARCH.md`).
-- **Caption drift:** rewrites every cue's timestamp by the detected offset.
-  Crucially, drift is re-measured against the *corrected* video's audio, not
-  the original -- because trimming/padding the audio track shifts its whole
-  timeline, so measuring against the original would silently give the wrong
-  correction for the new file (composing two corrections algebraically is
-  error-prone; re-measuring against the actual output at each step isn't).
+## Title-level drift classification + dialogue-scene detection
 
-## Title-level drift classification (M3a)
-
-Beyond a single global offset, SyncSentry can tell apart *why* a title is
-out of sync -- following DiVAS (CVPR 2024): a robust (RANSAC) line fit
-across per-window offset estimates classifies the whole title as one of
-`in_sync`, `constant_offset`, `drift_increasing`, `drift_decreasing`,
-`intermittent`, or `unstable`.
+A robust (RANSAC) fit across per-window offsets classifies *why* a title is
+out of sync (`in_sync` / `constant_offset` / `drift_increasing` /
+`drift_decreasing` / `intermittent`) -- DiVAS's (CVPR 2024) core idea.
 
 ```bash
 syncsentry classify-drift --video asset.mkv
+syncsentry dialogue-scenes --video interview.mkv   # real face + real speech overlap
 ```
 
-```
-Title drift pattern : intermittent
-Slope                : -0.05 ms/s
-Intercept            : +1.14 ms
-Inlier ratio         : 0.70 (10 scenes analyzed)
-Intermittent window  : 7.5s - 10.5s (offset ~+247ms)
-```
-
-The per-window *estimator* here is still the Tier-1 signal-processing
-detector (M3c swaps it for a learned lip-sync embedding model; see
-[`docs/ROADMAP.md`](docs/ROADMAP.md)); the classification logic itself is
-already the real, tested DiVAS-style contribution.
-
-**A concrete finding from M3b's real-content testing (see below) matters
-here:** on real talking-head footage, Tier-1's per-window confidence gate
-lets through "confident" windows whose offsets range 0-480ms against a true
-offset of 0ms throughout -- global frame brightness spuriously correlates
-with real speech energy often enough to fool a threshold tuned on clean
-synthetic pulses. `classify-drift` on real content should be read with that
-caveat until M3c's learned estimator replaces the per-window scorer.
-
-## Real dialogue-scene detection (M3b)
-
-DiVAS-style per-scene classification needs real "dialogue scenes" -- time
-ranges with an actual face on screen *and* actual speech, not just fixed
-windows. M3b implements that with two independently-validated real models
-(no mocks): OpenCV's YuNet face detector and Silero VAD, intersected and
-gap-merged.
-
-```bash
-syncsentry dialogue-scenes --video interview.mkv
-```
-
-```
-4 dialogue scene(s), 25.8s total:
-     0.10s -    5.30s  (dur  5.20s)
-    10.08s -   18.74s  (dur  8.66s)
-    27.84s -   33.14s  (dur  5.30s)
-    41.40s -   48.02s  (dur  6.62s)
-```
-
-That output is real, from a real CC BY 3.0 interview clip fetched
-specifically to validate this (see
-[`analyzer/fixtures/real_content/SOURCES.md`](analyzer/fixtures/real_content/SOURCES.md)),
-not a synthetic fixture -- 52% dialogue-scene coverage, matching a manual
-frame-by-frame check of the footage. Building this also surfaced a real
-platform gotcha worth knowing about if you're doing face detection on
-macOS: mediapipe's Tasks API crashed in this project's execution
-environment (a Metal GPU service dependency that's unavailable even under
-a CPU delegate), which is why YuNet -- not mediapipe -- is what's used here.
-Full writeup in [`docs/RESEARCH.md`](docs/RESEARCH.md#2b-real-face-detection-has-its-own-platform-gotchas----and-a-smaller-model-was-the-fix).
+The per-window estimator is still Tier-1 signal processing (learned
+estimator = M3c). On real talking-head footage that estimator can pass its
+own confidence gate on spurious correlations -- validated against a real CC
+BY 3.0 clip and documented in [`docs/RESEARCH.md`](docs/RESEARCH.md), which
+is exactly why `dialogue-scenes` (real face detection + real VAD,
+independently validated) exists as the trustworthy half of this milestone.
 
 ## HTTP API
 
@@ -235,88 +115,56 @@ curl -F "video=@asset.mkv" http://localhost:8000/v1/classify-drift
 curl -F "video=@asset.mkv" http://localhost:8000/v1/dialogue-scenes
 ```
 
-Thin by design -- every endpoint calls straight into the same
-`pipeline`/`title_drift` code the CLI and test suite use, so there's no
-logic that only exists in the API layer. This is the Python-side ML/analysis
-worker; the Go `orchestrator` service (M4) will front it for catalog-scale
-batch scheduling rather than duplicate its logic.
+Thin by design: every endpoint calls the same `pipeline`/`lipsync` code the
+CLI and tests use.
 
 ## Quickstart
 
 ```bash
 cd analyzer
 python3.11 -m venv .venv && source .venv/bin/activate
-pip install -r requirements-core.txt && pip install -e .
+pip install -r requirements-core.txt -r requirements-api.txt -r requirements-ml.txt
+pip install -e .
 
-# Generate a synthetic fixture with a known 150ms A/V offset + matching captions
 syncsentry gen-fixture --out fixtures/demo.mkv --offset-ms 150 --captions
-
-# Detect only
-syncsentry detect-offset --video fixtures/demo.mkv
-syncsentry check-captions --video fixtures/demo.mkv --captions fixtures/demo.vtt
-
-# Detect AND fix, with a short report
 syncsentry fix --video fixtures/demo.mkv --captions fixtures/demo.vtt --out-dir out/
-
-# Reproduce the full benchmark suite + charts
 syncsentry benchmark --out-dir ../benchmark/results
 
-# Run the test suite (53 cases: offset-recovery, fix round-trips, pipeline
-# e2e, title-drift classification, dialogue-scene detection, API e2e)
-pytest tests/ -v
+pytest tests/ -v   # 56 cases (4 real-content ones auto-skip without step below)
 
-# Optional: fetch a small CC-licensed real clip and validate face detection
-# + VAD against genuine faces/speech (never committed; see
-# analyzer/fixtures/real_content/SOURCES.md)
-bash scripts/fetch_real_content.sh
-pytest tests/test_dialogue_scenes_real.py -v
+# Optional: validate face detection + VAD against a real CC-licensed clip
+bash scripts/fetch_real_content.sh && pytest tests/test_dialogue_scenes_real.py -v
 ```
 
 ## Tech stack
 
-- **Python 3.11** (signal processing, detectors, benchmark harness) --
-  NumPy/SciPy for envelope cross-correlation, OpenCV for frame-level video
-  analysis and YuNet face detection, soundfile for sample-accurate audio
-  synthesis, pytest for recovery-accuracy testing.
-- **Silero VAD** -- real speech-activity detection, validated against a
-  real interview clip (M3b).
-- **PyTorch (Apple Silicon MPS backend)** -- Tier 2 learned per-scene
-  embedding model (M3c, in progress); currently used by Silero VAD's
-  runtime.
-- **Go** -- orchestration/API service, catalog batch runner (in progress).
-- **FFmpeg** -- media I/O, synthetic fixture rendering.
+Python 3.11 (NumPy/SciPy/OpenCV for signal + face detection) · Silero VAD ·
+PyTorch (Apple Silicon MPS) · Go (orchestrator) · FFmpeg.
 
 ## Repo layout
 
 ```
-analyzer/            Python package (syncsentry): detectors, synth fixtures, CLI, tests
+analyzer/            Python package: detectors, fixers, lipsync, API, CLI, tests
   syncsentry/
     synth/            Ground-truth fixture generator
     detectors/        Coarse A/V offset detector (cross-correlation)
     captions/         Caption-vs-speech drift checker
-    fixer/            Applies A/V offset + caption drift corrections
-    lipsync/          M3a windowed offsets + RANSAC title-drift classification;
-                      M3b real face detection (YuNet) + VAD (Silero) + dialogue
-                      -scene detection; M3c learned estimator (in progress)
-    report/           Benchmark harness + short human-readable report
-    pipeline.py       End-to-end detect -> fix -> re-measure orchestration
-    api.py            FastAPI HTTP service (thin wrapper over pipeline/lipsync)
-    util/             ffmpeg/ffprobe/OpenCV wrappers
-  fixtures/real_content/  Real-content fixture for M3b validation (gitignored
-                      except SOURCES.md -- see analyzer/scripts/fetch_real_content.sh)
-  scripts/            Dev tooling (e.g. fetch_real_content.sh)
-  tests/              Recovery, fix round-trip, e2e, drift-classification,
-                      dialogue-scene, API tests
-benchmark/results/    Generated benchmark tables + charts (reproducible, committed)
+    fixer/            Applies A/V + caption corrections
+    lipsync/          Windowed offsets, RANSAC drift classification,
+                      real face detection (YuNet) + VAD (Silero) + dialogue scenes
+    pipeline.py       Detect -> fix -> re-measure orchestration
+    api.py            FastAPI HTTP service
+  fixtures/real_content/  Real-content test fixture (gitignored; see SOURCES.md)
+  scripts/            Dev tooling (fetch_real_content.sh)
+  tests/
+benchmark/results/    Generated benchmark tables + charts (committed)
 services/orchestrator/  Go orchestration/API service (in progress)
-docs/
-  RESEARCH.md         Literature review, paper -> design-decision mapping
-  ROADMAP.md          Milestone status and rationale
+docs/RESEARCH.md     Literature -> design-decision mapping
+docs/ROADMAP.md      Milestone status
 ```
 
 ## Background
 
-Built by [Arjun T](mailto:arjun.thekkethil11@gmail.com), extending production
-caption-sync and frame-accurate VOD/iVOD tooling experience from Fox
-Corporation's OTT Media Systems team into the current A/V-sync research
-literature. See [`docs/RESEARCH.md`](docs/RESEARCH.md) for details.
+Built by [Arjun T](mailto:arjun.thekkethil11@gmail.com), extending
+production caption-sync and frame-accurate VOD/iVOD tooling experience from
+Fox Corporation's OTT Media Systems team into current A/V-sync research.
