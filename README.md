@@ -50,8 +50,8 @@ flowchart LR
         D --> O2[Per-cue caption drift report]
     end
 
-    subgraph "Tier 2 -- learned per-scene (in progress)"
-        F[Dialogue scene detection] --> G[SyncNet-family embedding model]
+    subgraph "Tier 2 -- learned per-scene (dialogue-scene detection done; embedding model in progress)"
+        F[Dialogue scene detection: face + VAD overlap] --> G[SyncNet-family embedding model]
         G --> H[Per-scene offset + confidence]
         H --> I[RANSAC title-level regression]
         I --> O3[Drift type: constant / drift-early / drift-late / intermittent]
@@ -183,10 +183,48 @@ Intermittent window  : 7.5s - 10.5s (offset ~+247ms)
 ```
 
 The per-window *estimator* here is still the Tier-1 signal-processing
-detector (M3b swaps it for a learned lip-sync embedding model once real
-face/speech content is available to validate against -- see
+detector (M3c swaps it for a learned lip-sync embedding model; see
 [`docs/ROADMAP.md`](docs/ROADMAP.md)); the classification logic itself is
 already the real, tested DiVAS-style contribution.
+
+**A concrete finding from M3b's real-content testing (see below) matters
+here:** on real talking-head footage, Tier-1's per-window confidence gate
+lets through "confident" windows whose offsets range 0-480ms against a true
+offset of 0ms throughout -- global frame brightness spuriously correlates
+with real speech energy often enough to fool a threshold tuned on clean
+synthetic pulses. `classify-drift` on real content should be read with that
+caveat until M3c's learned estimator replaces the per-window scorer.
+
+## Real dialogue-scene detection (M3b)
+
+DiVAS-style per-scene classification needs real "dialogue scenes" -- time
+ranges with an actual face on screen *and* actual speech, not just fixed
+windows. M3b implements that with two independently-validated real models
+(no mocks): OpenCV's YuNet face detector and Silero VAD, intersected and
+gap-merged.
+
+```bash
+syncsentry dialogue-scenes --video interview.mkv
+```
+
+```
+4 dialogue scene(s), 25.8s total:
+     0.10s -    5.30s  (dur  5.20s)
+    10.08s -   18.74s  (dur  8.66s)
+    27.84s -   33.14s  (dur  5.30s)
+    41.40s -   48.02s  (dur  6.62s)
+```
+
+That output is real, from a real CC BY 3.0 interview clip fetched
+specifically to validate this (see
+[`analyzer/fixtures/real_content/SOURCES.md`](analyzer/fixtures/real_content/SOURCES.md)),
+not a synthetic fixture -- 52% dialogue-scene coverage, matching a manual
+frame-by-frame check of the footage. Building this also surfaced a real
+platform gotcha worth knowing about if you're doing face detection on
+macOS: mediapipe's Tasks API crashed in this project's execution
+environment (a Metal GPU service dependency that's unavailable even under
+a CPU delegate), which is why YuNet -- not mediapipe -- is what's used here.
+Full writeup in [`docs/RESEARCH.md`](docs/RESEARCH.md#2b-real-face-detection-has-its-own-platform-gotchas----and-a-smaller-model-was-the-fix).
 
 ## HTTP API
 
@@ -194,6 +232,7 @@ already the real, tested DiVAS-style contribution.
 uvicorn syncsentry.api:app --port 8000
 curl -F "video=@asset.mkv" -F "captions=@asset.vtt" http://localhost:8000/v1/fix
 curl -F "video=@asset.mkv" http://localhost:8000/v1/classify-drift
+curl -F "video=@asset.mkv" http://localhost:8000/v1/dialogue-scenes
 ```
 
 Thin by design -- every endpoint calls straight into the same
@@ -222,19 +261,28 @@ syncsentry fix --video fixtures/demo.mkv --captions fixtures/demo.vtt --out-dir 
 # Reproduce the full benchmark suite + charts
 syncsentry benchmark --out-dir ../benchmark/results
 
-# Run the test suite (42 cases: offset-recovery, fix round-trips, pipeline
-# e2e, title-drift classification, API e2e)
+# Run the test suite (53 cases: offset-recovery, fix round-trips, pipeline
+# e2e, title-drift classification, dialogue-scene detection, API e2e)
 pytest tests/ -v
+
+# Optional: fetch a small CC-licensed real clip and validate face detection
+# + VAD against genuine faces/speech (never committed; see
+# analyzer/fixtures/real_content/SOURCES.md)
+bash scripts/fetch_real_content.sh
+pytest tests/test_dialogue_scenes_real.py -v
 ```
 
 ## Tech stack
 
 - **Python 3.11** (signal processing, detectors, benchmark harness) --
   NumPy/SciPy for envelope cross-correlation, OpenCV for frame-level video
-  analysis, soundfile for sample-accurate audio synthesis, pytest for
-  recovery-accuracy testing.
-- **PyTorch (Apple Silicon MPS backend)** -- Tier 2 learned per-scene model
-  (in progress).
+  analysis and YuNet face detection, soundfile for sample-accurate audio
+  synthesis, pytest for recovery-accuracy testing.
+- **Silero VAD** -- real speech-activity detection, validated against a
+  real interview clip (M3b).
+- **PyTorch (Apple Silicon MPS backend)** -- Tier 2 learned per-scene
+  embedding model (M3c, in progress); currently used by Silero VAD's
+  runtime.
 - **Go** -- orchestration/API service, catalog batch runner (in progress).
 - **FFmpeg** -- media I/O, synthetic fixture rendering.
 
@@ -247,13 +295,18 @@ analyzer/            Python package (syncsentry): detectors, synth fixtures, CLI
     detectors/        Coarse A/V offset detector (cross-correlation)
     captions/         Caption-vs-speech drift checker
     fixer/            Applies A/V offset + caption drift corrections
-    lipsync/          M3a windowed per-scene offsets + RANSAC title-drift
-                      classification (M3b learned estimator: in progress)
+    lipsync/          M3a windowed offsets + RANSAC title-drift classification;
+                      M3b real face detection (YuNet) + VAD (Silero) + dialogue
+                      -scene detection; M3c learned estimator (in progress)
     report/           Benchmark harness + short human-readable report
     pipeline.py       End-to-end detect -> fix -> re-measure orchestration
     api.py            FastAPI HTTP service (thin wrapper over pipeline/lipsync)
     util/             ffmpeg/ffprobe/OpenCV wrappers
-  tests/              Recovery, fix round-trip, e2e, drift-classification, API tests
+  fixtures/real_content/  Real-content fixture for M3b validation (gitignored
+                      except SOURCES.md -- see analyzer/scripts/fetch_real_content.sh)
+  scripts/            Dev tooling (e.g. fetch_real_content.sh)
+  tests/              Recovery, fix round-trip, e2e, drift-classification,
+                      dialogue-scene, API tests
 benchmark/results/    Generated benchmark tables + charts (reproducible, committed)
 services/orchestrator/  Go orchestration/API service (in progress)
 docs/

@@ -4,6 +4,8 @@
     syncsentry detect-offset --video fixtures/x.mkv
     syncsentry check-captions --video fixtures/x.mkv --captions fixtures/x.vtt
     syncsentry fix           --video fixtures/x.mkv --captions fixtures/x.vtt --out-dir out/
+    syncsentry classify-drift --video fixtures/x.mkv
+    syncsentry dialogue-scenes --video fixtures/x.mkv
     syncsentry benchmark      --out-dir benchmark/results
 """
 from __future__ import annotations
@@ -83,6 +85,22 @@ def cmd_classify_drift(args: argparse.Namespace) -> None:
         print(f"Intermittent window  : {lo:.1f}s - {hi:.1f}s (offset ~{result.intermittent_offset_ms:+.0f}ms)")
 
 
+def cmd_dialogue_scenes(args: argparse.Namespace) -> None:
+    from syncsentry.lipsync.dialogue_scenes import detect_dialogue_scenes
+
+    scenes = detect_dialogue_scenes(
+        args.video, sample_fps=args.sample_fps, min_duration_s=args.min_duration_s,
+    )
+    if not scenes:
+        print("No dialogue scenes found (no time range with both a face on screen and active speech).")
+        return
+
+    total_s = sum(s.end_s - s.start_s for s in scenes)
+    print(f"{len(scenes)} dialogue scene(s), {total_s:.1f}s total:")
+    for s in scenes:
+        print(f"  {s.start_s:7.2f}s - {s.end_s:7.2f}s  (dur {s.end_s - s.start_s:5.2f}s)")
+
+
 def cmd_benchmark(args: argparse.Namespace) -> None:
     from syncsentry.report.benchmark import run_av_offset_benchmark, run_caption_drift_benchmark
 
@@ -134,6 +152,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--video", required=True)
     p.add_argument("--window-s", type=float, default=3.0)
     p.set_defaults(func=cmd_classify_drift)
+
+    p = sub.add_parser("dialogue-scenes", help="Detect real dialogue scenes (face on screen AND speech active)")
+    p.add_argument("--video", required=True)
+    p.add_argument("--sample-fps", type=float, default=2.0, help="Face-detection sampling rate")
+    p.add_argument("--min-duration-s", type=float, default=1.0)
+    p.set_defaults(func=cmd_dialogue_scenes)
 
     p = sub.add_parser("benchmark", help="Run the full offset-recovery benchmark sweep and write a report")
     p.add_argument("--out-dir", default="benchmark/results")
