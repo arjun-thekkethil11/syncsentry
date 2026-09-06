@@ -63,6 +63,26 @@ def cmd_fix(args: argparse.Namespace) -> None:
     print(summary.to_text())
 
 
+def cmd_classify_drift(args: argparse.Namespace) -> None:
+    from syncsentry.lipsync.scene_offsets import estimate_windowed_offsets
+    from syncsentry.lipsync.title_drift import classify_title_drift
+
+    windows = estimate_windowed_offsets(args.video, window_s=args.window_s)
+    if len(windows) < 3:
+        print(f"Only {len(windows)} confident scene(s) found -- not enough to classify a title-level "
+              f"pattern (need >= 3). Try a longer asset or a smaller --window-s.")
+        return
+
+    result = classify_title_drift(windows)
+    print(f"Title drift pattern : {result.pattern}")
+    print(f"Slope                : {result.slope_ms_per_s:+.2f} ms/s")
+    print(f"Intercept            : {result.intercept_ms:+.2f} ms")
+    print(f"Inlier ratio         : {result.inlier_ratio:.2f} ({len(windows)} scenes analyzed)")
+    if result.intermittent_window_s:
+        lo, hi = result.intermittent_window_s
+        print(f"Intermittent window  : {lo:.1f}s - {hi:.1f}s (offset ~{result.intermittent_offset_ms:+.0f}ms)")
+
+
 def cmd_benchmark(args: argparse.Namespace) -> None:
     from syncsentry.report.benchmark import run_av_offset_benchmark, run_caption_drift_benchmark
 
@@ -109,6 +129,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--av-threshold-ms", type=float, default=40.0)
     p.add_argument("--caption-threshold-ms", type=float, default=80.0)
     p.set_defaults(func=cmd_fix)
+
+    p = sub.add_parser("classify-drift", help="Classify a title's sync-drift pattern (constant/drift/intermittent)")
+    p.add_argument("--video", required=True)
+    p.add_argument("--window-s", type=float, default=3.0)
+    p.set_defaults(func=cmd_classify_drift)
 
     p = sub.add_parser("benchmark", help="Run the full offset-recovery benchmark sweep and write a report")
     p.add_argument("--out-dir", default="benchmark/results")

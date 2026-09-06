@@ -47,17 +47,59 @@ actually implemented and tested, not aspirational scope.
            head-room instead of masking it with a wider tolerance.
       - 32 pytest cases total (14 new: 6 A/V fix round-trips, 4 caption fix
         round-trips, 1 no-op case, 3 pipeline e2e cases).
-- [ ] **M3 -- Learned per-scene / per-title drift classification.**
-      - Dialogue-scene detection (face + speech-active segments).
-      - SyncNet-family pretrained embedding model for per-scene offset
-        (PyTorch, Apple Silicon MPS backend).
-      - DiVAS-style RANSAC regression across scenes to classify
-        constant-offset / drift-early / drift-late / intermittent per title.
-      - Swap the synthetic-beep onset picker in the caption checker for a
-        real VAD (Silero-VAD) so it works on real speech.
-- [ ] **M4 -- Orchestration service (Go).**
-      - Job queue + asset state (Postgres), batch runner over a catalog.
-      - REST API exposing per-title sync-health reports.
+- [x] **M2.6 -- HTTP API.** FastAPI service (`syncsentry/api.py`) wrapping
+      the same `pipeline`/`title_drift` code the CLI and tests use --
+      `POST /v1/fix`, `POST /v1/classify-drift`, `GET /healthz`, file
+      download endpoints. Thin by design: no logic lives only in the API
+      layer. Verified both via `TestClient` (7 tests) and a real running
+      `uvicorn` server hit with `curl`. This is the Python-side worker API;
+      the Go orchestrator (M4) will front it for catalog-scale batch jobs
+      rather than duplicate it.
+- [x] **M3a -- Statistical drift-pattern classification (DiVAS-style).**
+      - `syncsentry/lipsync/scene_offsets.py`: slides a window across a
+        whole title's audio/video envelopes (extracted once, not
+        re-extracted per window) and estimates a per-window A/V offset
+        using the already-validated Tier-1 cross-correlation detector,
+        dropping low-confidence windows.
+      - `syncsentry/lipsync/title_drift.py`: a from-scratch RANSAC line fit
+        (numpy only) over (scene_time, scene_offset) pairs, classifying the
+        title as `in_sync` / `constant_offset` / `drift_increasing` /
+        `drift_decreasing` / `intermittent` / `unstable` -- the actual
+        DiVAS (CVPR 2024) contribution this project is built around.
+      - Extended the synthetic fixture generator
+        (`generate_piecewise_offset_fixture`) to inject *time-varying*
+        offset schedules (ramps, localized bumps), not just a constant
+        offset, so all five drift patterns have ground-truth tests.
+      - New CLI command (`syncsentry classify-drift`) and API endpoint
+        (`POST /v1/classify-drift`). 6 new tests, all passing, including
+        exact recovery of an injected intermittent-drift window (detected
+        7.5s-10.5s vs. injected 7.3s-10.7s; detected bump 246.7ms vs.
+        injected 250ms).
+      - **What this is not (yet):** the per-window *estimator* is still the
+        Tier-1 signal-processing detector, not a learned lip-sync embedding
+        model, and scenes are fixed-length windows, not real dialogue
+        scenes (face + speech-activity overlap). Both are deferred to
+        **M3b** below rather than built untested against synthetic content
+        that has no faces in it.
+- [ ] **M3b -- Learned per-scene estimator + real dialogue-scene detection
+      (deferred until real content is available).**
+      - Dialogue-scene detection (mediapipe face detection + real
+        speech-activity overlap, e.g. Silero-VAD) -- both installed and
+        confirmed working (PyTorch 2.14 on Apple Silicon MPS; see commit
+        history), but not meaningfully unit-testable without real
+        face/speech content, which is why this is sequenced after M3a's
+        purely statistical layer rather than before it.
+      - Swap the per-window estimator in `scene_offsets.py` for a
+        SyncNet-family pretrained embedding model -- the interface
+        (`list[SceneOffset]` in, same `title_drift` classification code) is
+        already designed for this to be a drop-in replacement.
+      - Real VAD (Silero) for the caption checker, replacing the
+        energy-threshold onset picker for real speech (kept as the default
+        for synthetic-tone fixtures, where a speech-specific VAD wouldn't
+        even fire).
+- [ ] **M4 -- Go orchestrator: catalog batch runner.**
+      - Job queue + asset state (Postgres), scheduling across a catalog of
+        many assets, calling the Python API (M2.6) as a worker.
       - Structured logging / metrics in the style of the observability
         work this project is modeled after.
 - [ ] **M5 -- Sync-health dashboard.**
