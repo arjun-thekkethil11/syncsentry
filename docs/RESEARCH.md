@@ -103,6 +103,43 @@ being re-validated against known offsets gets caught, not shipped). This
 is the concrete evidence that M3c genuinely needs a pretrained model, not
 just a smaller ROI.
 
+## 1e. The actual pretrained model (M3c) validates -- with real numbers
+
+Rather than re-implement SyncNet's exact preprocessing (face-track cropping
+at 224x224, MFCC windows, the CNN itself) and risk another subtle bug like
+§1d, `syncsentry/lipsync/syncnet_offset.py` wraps the original
+[joonson/syncnet_python](https://github.com/joonson/syncnet_python) (MIT)
+as an external tool -- vendored via `analyzer/scripts/fetch_syncnet.sh`,
+never committed (`analyzer/third_party/SOURCES.md`), same policy as the
+real-content clip.
+
+Same injected-known-offset methodology as §1d, now on the model this
+project actually ships: `fix_av_offset` used as an offset *injector* on the
+genuinely-in-sync real clip, 3 independently-detected face tracks per run.
+
+| true offset | SyncNet estimate (median of 3 tracks) | confidence (median) |
+|---|---|---|
+| 0ms | 0ms (frame offsets: 0, +1, 0) | 6.8 |
+| +150ms | +133ms (-4, -3, -3 frames) | 7.0 |
+| -200ms | -213ms (+5, +6, +5 frames) | 6.7 |
+| +300ms | +293ms (-8, -7, -7 frames) | 6.4 |
+
+Every case recovers ground truth within ~1 frame (40ms at the tracker's
+25fps) -- the error §1b's coarse detector and §1d's heuristic both had is
+gone. Confidence stays in a consistent, meaningfully-nonzero range (~4-8.5)
+across all 3 tracks and both an in-sync and 3 out-of-sync injected cases,
+unlike the coarse detector's negative/near-zero confidence on this same
+clip. Pinned in `analyzer/tests/test_syncnet_offset_real.py` (2 of the 4
+cases above, to keep CI-skipped-but-runnable-locally test time bounded --
+each case takes a few minutes: real S3FD face detection/tracking + a CNN,
+CPU-only).
+
+**Why this isn't the new default:** each run takes minutes, not
+milliseconds -- fine for an opt-in `--use-syncnet` tier, not for the
+default `syncsentry fix` path most users hit first. The coarse detector
+(with its honest confidence gate, §1c) stays the fast default; SyncNet is
+the accurate-but-slow tier for when it matters.
+
 ## 2. Lip-sync detection has moved to learned contrastive embeddings
 
 [SyncNet](http://arxiv.org/pdf/2005.08606v1) and successors --
@@ -112,9 +149,9 @@ just a smaller ROI.
 frame sync as *contrastive learning*: audio/visual embedding similarity as
 a function of candidate offset picks the true offset.
 
-**Decision:** M3's fine-grained detector will use a pretrained SyncNet-family
-model, restricted to real dialogue scenes (face + speech both present),
-complementing rather than replacing the coarse detector.
+**Decision:** M3's fine-grained detector uses a pretrained SyncNet model
+(now implemented, §1e), restricted to real dialogue scenes (face + speech
+both present), complementing rather than replacing the coarse detector.
 
 **Dialogue scenes are now real, not stubbed.** `syncsentry/lipsync/dialogue_scenes.py`
 intersects face-presence and speech-activity intervals (gap-merged,

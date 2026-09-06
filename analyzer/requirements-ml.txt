@@ -7,6 +7,11 @@ torchvision>=0.18
 scenedetect>=0.6.4
 silero-vad>=6.2
 
+# M3c: needed only if you run `bash analyzer/scripts/fetch_syncnet.sh` /
+# use `--use-syncnet` -- the vendored syncnet_python's own dependencies.
+python_speech_features>=0.6
+tqdm>=4.0
+
 # NOTE: mediapipe is intentionally NOT used, despite being the "obvious"
 # face-detection choice. Its Tasks API initializes a Metal-backed image
 # pipeline that crashes ("Check failed: service_ Service is unavailable")

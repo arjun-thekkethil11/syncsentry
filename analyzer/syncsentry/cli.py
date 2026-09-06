@@ -62,6 +62,8 @@ def cmd_fix(args: argparse.Namespace) -> None:
         av_threshold_ms=args.av_threshold_ms,
         caption_threshold_ms=args.caption_threshold_ms,
         av_min_confidence=args.av_min_confidence,
+        use_syncnet=args.use_syncnet,
+        syncnet_min_confidence=args.syncnet_min_confidence,
     )
     print(summary.to_text())
 
@@ -151,6 +153,18 @@ def build_parser() -> argparse.ArgumentParser:
                     help="Below this cross-correlation confidence, treat the A/V offset as "
                          "undetermined rather than 'detected' -- avoids 'fixing' noise on real "
                          "talking-head content (see docs/RESEARCH.md section 1b)")
+    p.add_argument("--use-syncnet", action="store_true",
+                    help="Use the pretrained SyncNet model (M3c) instead of the fast coarse "
+                         "detector -- far more accurate on real talking-head content (see "
+                         "docs/RESEARCH.md section 1e), but takes minutes per video (real face "
+                         "detection/tracking + a CNN, run on CPU) instead of seconds. Requires "
+                         "`bash analyzer/scripts/fetch_syncnet.sh` to have been run once; falls "
+                         "back to the coarse detector with a note if it hasn't, or if no "
+                         "trackable face is found.")
+    p.add_argument("--syncnet-min-confidence", type=float, default=3.0,
+                    help="Below this SyncNet confidence (a different, non-[0,1] scale than "
+                         "--av-min-confidence), treat the offset as undetermined. Only used "
+                         "with --use-syncnet.")
     p.set_defaults(func=cmd_fix)
 
     p = sub.add_parser("classify-drift", help="Classify a title's sync-drift pattern (constant/drift/intermittent)")

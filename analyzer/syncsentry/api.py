@@ -52,9 +52,18 @@ def healthz() -> dict:
 
 @app.post("/v1/fix")
 async def fix(video: UploadFile = File(...), captions: UploadFile | None = File(None),
-               av_min_confidence: float = 0.3) -> dict:
+               av_min_confidence: float = 0.3, use_syncnet: bool = False,
+               syncnet_min_confidence: float = 3.0) -> dict:
     """Upload a video (and optionally its captions), get back a short report
     plus download links for the corrected files.
+
+    `use_syncnet` (default False): use the pretrained SyncNet model (M3c,
+    docs/RESEARCH.md section 1e) instead of the fast coarse detector. Far
+    more accurate on real talking-head content, but this request will then
+    take minutes rather than seconds (real face detection/tracking + a CNN,
+    CPU-bound) -- set a generous client timeout. Requires the model to have
+    been fetched server-side (`analyzer/scripts/fetch_syncnet.sh`); silently
+    falls back to the coarse detector (noted in the response) otherwise.
 
     `av_min_confidence` (default 0.3, matching the CLI): below this
     cross-correlation confidence, the A/V offset is reported as
@@ -79,7 +88,8 @@ async def fix(video: UploadFile = File(...), captions: UploadFile | None = File(
 
     try:
         summary = run_fix_pipeline(video_path, job_dir / "out", captions_path=captions_path,
-                                    av_min_confidence=av_min_confidence)
+                                    av_min_confidence=av_min_confidence, use_syncnet=use_syncnet,
+                                    syncnet_min_confidence=syncnet_min_confidence)
     except Exception as exc:  # noqa: BLE001 -- surface the real error to the caller
         raise HTTPException(status_code=422, detail=f"Processing failed: {exc}") from exc
 

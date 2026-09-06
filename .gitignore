@@ -20,6 +20,11 @@ benchmark/results/_fixtures/
 analyzer/fixtures/real_content/*
 !analyzer/fixtures/real_content/SOURCES.md
 
+# Vendored third-party code + pretrained weights (M3c SyncNet, see
+# analyzer/scripts/fetch_syncnet.sh) -- never committed, same policy as above.
+analyzer/third_party/*
+!analyzer/third_party/SOURCES.md
+
 # Go
 services/orchestrator/bin/
 .pytest_cache

@@ -28,18 +28,20 @@ flowchart LR
         C[WebVTT cues] --> D[Caption vs. speech drift]
         E[Audio onset / VAD] --> D
     end
-    subgraph "Tier 2 -- learned per-scene (scene detection done; estimator in progress)"
-        F[Dialogue scenes: face + VAD overlap] --> G[SyncNet-family embedding]
+    subgraph "Tier 2 -- learned, opt-in (done, M3c)"
+        F[Dialogue scenes: face + VAD overlap] --> G[Pretrained SyncNet]
         G --> H[Per-scene offset] --> I[RANSAC regression] --> O3[Drift type]
     end
     V --> A & B & C & E & F
     O1 --> O3
 ```
 
-Tier 1 (`analyzer/`, Python) is fully implemented and benchmarked below.
-Tier 2's scene detection is real and validated; the learned estimator is
-still in progress (M3c). The Go orchestrator (`services/orchestrator/`) is
-scaffolded for catalog-scale batch runs (M4).
+Tier 1 (`analyzer/`, Python) is fast (seconds) and is the default. Tier 2
+(`--use-syncnet`) is a pretrained model that's far more accurate on real
+talking-head content but takes minutes per video (real face
+tracking + a CNN, CPU) -- opt-in, not the silent default. The Go
+orchestrator (`services/orchestrator/`) is scaffolded for catalog-scale
+batch runs (M4).
 
 ## Benchmark results
 
@@ -87,6 +89,13 @@ Overall: ✅ all issues resolved
   if there's a real issue (common on real talking-head content -- found via
   a real bug report, see [`docs/RESEARCH.md`](docs/RESEARCH.md)), instead of
   confidently "fixing" noise.
+- **`--use-syncnet`** swaps the fast coarse detector for a pretrained
+  SyncNet model (M3c) -- validated to recover known injected offsets on
+  real talking-head content within ~1 frame, where the coarse detector
+  (and a hand-crafted mouth-motion heuristic that was tried first, see
+  [`docs/RESEARCH.md`](docs/RESEARCH.md) §1d/1e) genuinely cannot tell.
+  Trade-off: minutes per video instead of seconds, so it's opt-in.
+  Requires `bash analyzer/scripts/fetch_syncnet.sh` once.
 
 ## Title-level drift classification + dialogue-scene detection
 
@@ -99,12 +108,13 @@ syncsentry classify-drift --video asset.mkv
 syncsentry dialogue-scenes --video interview.mkv   # real face + real speech overlap
 ```
 
-The per-window estimator is still Tier-1 signal processing (learned
-estimator = M3c). On real talking-head footage that estimator can pass its
-own confidence gate on spurious correlations -- validated against a real CC
-BY 3.0 clip and documented in [`docs/RESEARCH.md`](docs/RESEARCH.md), which
-is exactly why `dialogue-scenes` (real face detection + real VAD,
-independently validated) exists as the trustworthy half of this milestone.
+`classify-drift`'s per-window estimator is still Tier-1 signal processing,
+which -- validated against a real CC BY 3.0 clip -- can pass its own
+confidence gate on spurious correlations (documented in
+[`docs/RESEARCH.md`](docs/RESEARCH.md)). `dialogue-scenes` (real face
+detection + real VAD, independently validated) is the trustworthy half of
+that finding; `syncsentry fix --use-syncnet` is the fix (a real pretrained
+estimator, see above), just not yet plumbed into `classify-drift` itself.
 
 ## HTTP API
 
@@ -130,16 +140,21 @@ syncsentry gen-fixture --out fixtures/demo.mkv --offset-ms 150 --captions
 syncsentry fix --video fixtures/demo.mkv --captions fixtures/demo.vtt --out-dir out/
 syncsentry benchmark --out-dir ../benchmark/results
 
-pytest tests/ -v   # 56 cases (4 real-content ones auto-skip without step below)
+pytest tests/ -v   # 62 cases (6 real-content ones auto-skip without steps below)
 
 # Optional: validate face detection + VAD against a real CC-licensed clip
 bash scripts/fetch_real_content.sh && pytest tests/test_dialogue_scenes_real.py -v
+
+# Optional: fetch the pretrained SyncNet model (M3c, --use-syncnet)
+bash scripts/fetch_syncnet.sh
+syncsentry fix --video fixtures/real_content/dialogue_clip.mkv --out-dir out/ --use-syncnet
 ```
 
 ## Tech stack
 
 Python 3.11 (NumPy/SciPy/OpenCV for signal + face detection) · Silero VAD ·
-PyTorch (Apple Silicon MPS) · Go (orchestrator) · FFmpeg.
+pretrained SyncNet + S3FD (opt-in, `--use-syncnet`) · PyTorch (Apple Silicon
+MPS) · Go (orchestrator) · FFmpeg.
 
 ## Repo layout
 
@@ -151,11 +166,13 @@ analyzer/            Python package: detectors, fixers, lipsync, API, CLI, tests
     captions/         Caption-vs-speech drift checker
     fixer/            Applies A/V + caption corrections
     lipsync/          Windowed offsets, RANSAC drift classification,
-                      real face detection (YuNet) + VAD (Silero) + dialogue scenes
+                      real face detection (YuNet) + VAD (Silero) + dialogue
+                      scenes + pretrained SyncNet estimator (M3c)
     pipeline.py       Detect -> fix -> re-measure orchestration
     api.py            FastAPI HTTP service
   fixtures/real_content/  Real-content test fixture (gitignored; see SOURCES.md)
-  scripts/            Dev tooling (fetch_real_content.sh)
+  third_party/        Vendored syncnet_python + weights (gitignored; see SOURCES.md)
+  scripts/            Dev tooling (fetch_real_content.sh, fetch_syncnet.sh)
   tests/
 benchmark/results/    Generated benchmark tables + charts (committed)
 services/orchestrator/  Go orchestration/API service (in progress)
