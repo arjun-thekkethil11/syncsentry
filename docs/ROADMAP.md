@@ -52,6 +52,18 @@ implemented and tested, not aspirational scope.
         at all, and mislabeled an unverified fix as "FIXED." Now fixed and
         regression-tested. See `docs/RESEARCH.md` §1c.
       - 56 tests total (4 real-content ones auto-skip in CI).
+- [x] **M3b.5 -- Tried and falsified a classical mouth-motion heuristic.**
+      Hypothesis: restrict the coarse detector to mouth-ROI motion (YuNet
+      landmarks) within real dialogue scenes, instead of whole-frame
+      brightness -- prompted by a second real-user report ("still wrong")
+      on the M3b behavior above. Validated against the real clip with 4
+      *known* injected offsets (0/+150/-200/+300ms via `fix_av_offset` used
+      as an injector): confidence stayed low (~0.15-0.20) and didn't track
+      ground truth at all. Not wired into the pipeline -- would repeat the
+      exact §1b mistake with a different detector. Kept as a pinned
+      negative-result test (`test_mouth_offset_real.py`); real evidence
+      that M3c needs a learned model, not a smaller ROI. 60 tests total.
+      See `docs/RESEARCH.md` §1d.
 - [ ] **M3c -- Learned per-scene estimator (deferred until there's a way to
       validate it against real, ideally annotated, drift).**
       Swap the per-window estimator for a pretrained SyncNet-family model,

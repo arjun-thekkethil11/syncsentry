@@ -68,6 +68,41 @@ now fixed. All pinned in `analyzer/tests/test_pipeline.py`, including the
 exact real-content scenario above (now asserts a byte-for-byte passthrough
 instead of an unverifiable edit).
 
+Follow-up from a second real user report on a different real talking-head
+video ("the fix is not correct"): the skip message originally hid the raw
+estimate entirely, showing only a confidence score -- unhelpful if the user
+has their own (visual) evidence of a real offset and wants to judge the
+number themselves. Fixed: the note now always states the raw
+`offset_ms`/`direction` alongside confidence, plus the exact
+`--av-min-confidence` value needed to force it (explicitly labeled
+unverified).
+
+## 1d. A more targeted classical heuristic was tried -- and also falsified
+
+§1b's fix (skip below confidence 0.3) is honest but doesn't answer "so what
+*should* run on real dialogue content instead?" One hypothesis: whole-frame
+brightness fails because the mouth is a tiny fraction of the frame -- so
+restrict the visual signal to just the mouth (via YuNet's mouth-corner
+landmarks, already available from M3b) and just real dialogue scenes
+(`lipsync/mouth_offset.py`), same cross-correlation core, more targeted
+input.
+
+Tested properly, not just eyeballed: `fix_av_offset(clip, out, -X)` on the
+(genuinely in-sync) real clip injects a *known* true offset of `+X`ms --
+turning it into a labeled real-content dataset of one. Across four injected
+offsets (0, +150, -200, +300ms), the mouth-motion estimate did not track
+ground truth at all (e.g. true `+300ms` -> estimated `-33ms`), and
+confidence stayed low throughout (~0.14-0.20), same as the failing
+whole-frame method. Frame-to-frame pixel-difference motion in a mouth crop
+just isn't a strong enough feature -- consistent with why SyncNet-family
+work (§2) uses *learned* embeddings rather than hand-crafted motion energy.
+Kept as a documented negative result and pinned in
+`analyzer/tests/test_mouth_offset_real.py` (asserts confidence stays low,
+so a future change that starts reporting high confidence without actually
+being re-validated against known offsets gets caught, not shipped). This
+is the concrete evidence that M3c genuinely needs a pretrained model, not
+just a smaller ROI.
+
 ## 2. Lip-sync detection has moved to learned contrastive embeddings
 
 [SyncNet](http://arxiv.org/pdf/2005.08606v1) and successors --
