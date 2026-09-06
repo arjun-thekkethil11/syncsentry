@@ -37,12 +37,23 @@ from syncsentry.report.summary import IssueSummary, SyncFixSummary
 
 DEFAULT_AV_THRESHOLD_MS = 40.0  # ~1 frame at 25fps; tune per deployment
 DEFAULT_CAPTION_THRESHOLD_MS = 80.0
+# Matches the confidence gate already used by the windowed per-scene
+# estimator (syncsentry/lipsync/scene_offsets.py). Found necessary here too
+# via a real bug report: on real talking-head/dialogue content, global
+# frame-brightness cross-correlation produces "confident-looking" but
+# spurious offsets (see docs/RESEARCH.md section 1b) -- without this gate,
+# the pipeline would "fix" an offset that was never really there, and the
+# re-measurement afterward (also unreliable on the same content) could
+# easily report the exact same bogus number as a "residual", i.e. a fix
+# that visibly did nothing while still being labeled FIXED.
+DEFAULT_AV_MIN_CONFIDENCE = 0.3
 
 
 def run_fix_pipeline(video_path: str | Path, out_dir: str | Path,
                       captions_path: str | Path | None = None,
                       av_threshold_ms: float = DEFAULT_AV_THRESHOLD_MS,
-                      caption_threshold_ms: float = DEFAULT_CAPTION_THRESHOLD_MS) -> SyncFixSummary:
+                      caption_threshold_ms: float = DEFAULT_CAPTION_THRESHOLD_MS,
+                      av_min_confidence: float = DEFAULT_AV_MIN_CONFIDENCE) -> SyncFixSummary:
     video_path = Path(video_path)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -50,10 +61,23 @@ def run_fix_pipeline(video_path: str | Path, out_dir: str | Path,
     summary = SyncFixSummary(asset_name=video_path.name)
 
     # --- Step 1-3: A/V sync ---
-    av_estimate = estimate_av_offset(str(video_path))
+    av_estimate = estimate_av_offset(str(video_path), in_sync_threshold_ms=av_threshold_ms)
     corrected_video_path = out_dir / f"{video_path.stem}.corrected{video_path.suffix}"
 
-    if av_estimate.direction == "in_sync":
+    if av_estimate.confidence < av_min_confidence:
+        # Not "in sync below threshold" -- we genuinely can't tell. Treating
+        # this as "no issue" (rather than guessing a fix from noise) is the
+        # honest answer; see docs/RESEARCH.md section 1b for why this
+        # triggers on real dialogue/talking-head content specifically.
+        corrected_video_path.write_bytes(video_path.read_bytes())
+        summary.issues.append(IssueSummary(
+            name="A/V sync", had_issue=False, detected_offset_ms=av_estimate.offset_ms,
+            fixed=False, residual_offset_ms=None,
+            note=(f"low-confidence detection ({av_estimate.confidence:.2f}) -- can't reliably "
+                  f"tell if this asset has an A/V sync issue (common on real talking-head "
+                  f"content); skipped rather than applying an unverifiable fix"),
+        ))
+    elif av_estimate.direction == "in_sync":
         corrected_video_path.write_bytes(video_path.read_bytes())
         summary.issues.append(IssueSummary(
             name="A/V sync", had_issue=False, detected_offset_ms=av_estimate.offset_ms,
@@ -61,10 +85,11 @@ def run_fix_pipeline(video_path: str | Path, out_dir: str | Path,
         ))
     else:
         fix_av_offset(video_path, corrected_video_path, av_estimate.offset_ms)
-        residual = estimate_av_offset(str(corrected_video_path))
+        residual = estimate_av_offset(str(corrected_video_path), in_sync_threshold_ms=av_threshold_ms)
         summary.issues.append(IssueSummary(
             name="A/V sync", had_issue=True, detected_offset_ms=av_estimate.offset_ms,
-            fixed=True, residual_offset_ms=residual.offset_ms,
+            fixed=(residual.confidence >= av_min_confidence and abs(residual.offset_ms) <= av_threshold_ms),
+            residual_offset_ms=residual.offset_ms,
         ))
 
     summary.output_files["corrected_video"] = str(corrected_video_path)
@@ -91,9 +116,11 @@ def run_fix_pipeline(video_path: str | Path, out_dir: str | Path,
         else:
             fix_caption_offset(captions_path, corrected_captions_path, cap_report.median_offset_ms)
             residual_report = check_caption_drift(str(corrected_video_path), str(corrected_captions_path))
+            residual_ms = residual_report.median_offset_ms
             summary.issues.append(IssueSummary(
                 name="Captions", had_issue=True, detected_offset_ms=cap_report.median_offset_ms,
-                fixed=True, residual_offset_ms=residual_report.median_offset_ms,
+                fixed=(residual_ms is not None and abs(residual_ms) <= caption_threshold_ms),
+                residual_offset_ms=residual_ms,
             ))
 
         summary.output_files["corrected_captions"] = str(corrected_captions_path)
