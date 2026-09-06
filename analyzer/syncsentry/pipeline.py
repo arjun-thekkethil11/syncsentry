@@ -73,9 +73,12 @@ def run_fix_pipeline(video_path: str | Path, out_dir: str | Path,
         summary.issues.append(IssueSummary(
             name="A/V sync", had_issue=False, detected_offset_ms=av_estimate.offset_ms,
             fixed=False, residual_offset_ms=None,
-            note=(f"low-confidence detection ({av_estimate.confidence:.2f}) -- can't reliably "
-                  f"tell if this asset has an A/V sync issue (common on real talking-head "
-                  f"content); skipped rather than applying an unverifiable fix"),
+            note=(f"low-confidence detection: raw estimate {av_estimate.offset_ms:+.0f}ms "
+                  f"({av_estimate.direction}), confidence {av_estimate.confidence:.2f} -- too low "
+                  f"to trust on this content (common on real talking-head footage); not applied "
+                  f"automatically. If your own check agrees with the direction, re-run with "
+                  f"--av-min-confidence {max(0.0, av_estimate.confidence - 0.05):.2f} to force it, "
+                  f"but treat the result as unverified"),
         ))
     elif av_estimate.direction == "in_sync":
         corrected_video_path.write_bytes(video_path.read_bytes())
