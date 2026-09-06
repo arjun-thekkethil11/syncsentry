@@ -3,6 +3,7 @@
     syncsentry gen-fixture   --out fixtures/x.mkv --offset-ms 150
     syncsentry detect-offset --video fixtures/x.mkv
     syncsentry check-captions --video fixtures/x.mkv --captions fixtures/x.vtt
+    syncsentry fix           --video fixtures/x.mkv --captions fixtures/x.vtt --out-dir out/
     syncsentry benchmark      --out-dir benchmark/results
 """
 from __future__ import annotations
@@ -49,6 +50,19 @@ def cmd_check_captions(args: argparse.Namespace) -> None:
     _print_json(report)
 
 
+def cmd_fix(args: argparse.Namespace) -> None:
+    from syncsentry.pipeline import run_fix_pipeline
+
+    summary = run_fix_pipeline(
+        video_path=args.video,
+        out_dir=args.out_dir,
+        captions_path=args.captions,
+        av_threshold_ms=args.av_threshold_ms,
+        caption_threshold_ms=args.caption_threshold_ms,
+    )
+    print(summary.to_text())
+
+
 def cmd_benchmark(args: argparse.Namespace) -> None:
     from syncsentry.report.benchmark import run_av_offset_benchmark, run_caption_drift_benchmark
 
@@ -87,6 +101,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--video", required=True)
     p.add_argument("--captions", required=True)
     p.set_defaults(func=cmd_check_captions)
+
+    p = sub.add_parser("fix", help="Detect and correct A/V offset and/or caption drift, with a short report")
+    p.add_argument("--video", required=True)
+    p.add_argument("--captions", default=None, help="Optional WebVTT file to also check/fix")
+    p.add_argument("--out-dir", required=True)
+    p.add_argument("--av-threshold-ms", type=float, default=40.0)
+    p.add_argument("--caption-threshold-ms", type=float, default=80.0)
+    p.set_defaults(func=cmd_fix)
 
     p = sub.add_parser("benchmark", help="Run the full offset-recovery benchmark sweep and write a report")
     p.add_argument("--out-dir", default="benchmark/results")

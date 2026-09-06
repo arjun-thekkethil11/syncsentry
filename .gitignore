@@ -22,3 +22,5 @@ analyzer/*.egg-info/
 
 # OS
 .DS_Store
+
+services/orchestrator/syncsentry-orchestrator

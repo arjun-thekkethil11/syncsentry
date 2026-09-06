@@ -94,6 +94,37 @@ picture cut points is the only way to catch that class of bug.
   picker for a proper VAD (e.g. Silero-VAD) so this works on real speech,
   not just synthetic tone bursts.
 
+## 4b. Fixing sync drift is not the mirror image of detecting it
+
+Once you can detect an offset, "fixing" it looks like it should be trivial
+(shift a timestamp). It isn't, for two reasons found empirically while
+building `syncsentry/fixer/`:
+
+**`-itsoffset` + stream copy is a metadata-only trick.** The obvious
+first implementation -- remux with `ffmpeg -itsoffset <delta> -i audio ...
+-c copy` -- changes the *container's* declared timestamp for a stream but
+does not insert or remove any samples/frames. Verified with our own
+detector: running it on an `-itsoffset`-remuxed file gave back the *exact
+same* offset estimate as the original, unchanged. Any consumer that reads
+raw decoded samples/frames by index (which is what
+`syncsentry.util.ffmpeg_io` does, and what a meaningful fraction of real
+players/analysis tools do) never sees a metadata-only "fix." The real fix
+re-encodes the audio track with a filter that actually adds/removes samples
+(`atrim` to advance, `adelay` to delay) -- see `syncsentry/fixer/av_fix.py`.
+
+**Corrections compose, and composing them by hand is fragile.** If you fix
+an A/V offset by trimming audio, you've changed that audio track's entire
+timeline. Any caption-drift measurement taken against the *original* audio
+is now wrong for the *corrected* file by exactly the amount you just fixed.
+`syncsentry/pipeline.py` avoids algebraic composition entirely: every step
+re-measures against the actual output of the previous step rather than
+trusting a computed correction. This is the same "trust but verify"
+discipline as the coarse-detector benchmarking in section 3 above -- and it
+caught a real bug in this project's own synthetic fixture generator (the
+WebVTT writer silently clamped negative cue timestamps to 0, corrupting one
+cue's ground truth for any large negative caption offset -- see
+`docs/ROADMAP.md`, M2.5, and the fix in `syncsentry/synth/fixture_gen.py`).
+
 ## 5. Adjacent OTT platform research (context, not yet built here)
 
 These informed which project this repo *isn't* (see the top-level project

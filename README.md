@@ -108,18 +108,59 @@ rather than a silent gap. Details in [`docs/RESEARCH.md`](docs/RESEARCH.md#3-coa
 
 | Injected caption offset (ms) | Recovered median (ms) | Matched cues | Flagged cues |
 |---:|---:|---:|---:|
-| -300 | -300.0 | 10 | 9 |
-| -80 | -80.0 | 10 | 8 |
-| -30 | -30.0 | 10 | 0 |
-| 0 | 0.0 | 10 | 0 |
-| 30 | 30.0 | 10 | 0 |
-| 80 | 80.0 | 10 | 9 |
-| 300 | 300.0 | 10 | 10 |
+| -300 | -300.0 | 9 | 9 |
+| -80 | -80.0 | 9 | 8 |
+| -30 | -30.0 | 9 | 0 |
+| 0 | 0.0 | 9 | 0 |
+| 30 | 30.0 | 9 | 0 |
+| 80 | 80.0 | 9 | 9 |
+| 300 | 300.0 | 9 | 9 |
 
 *(Full sweep in [`benchmark/results/caption_drift_benchmark.md`](benchmark/results/caption_drift_benchmark.md).
 Caption drift is checked against detected audio onsets directly, independent
 of the video track -- see [`docs/RESEARCH.md`](docs/RESEARCH.md#4-caption-drift-is-a-distinct-problem-from-pictureaudio-drift)
 for why that's a deliberate, distinct check from the A/V offset detector.)*
+
+## Detect + fix + report
+
+This is the actual end-user surface: point SyncSentry at a video (and
+optionally its captions), and it detects any A/V offset and/or caption
+drift, **corrects it**, re-measures the result to prove the fix worked, and
+writes a short report -- not a wall of internal metrics.
+
+```bash
+syncsentry fix --video asset.mkv --captions asset.vtt --out-dir out/
+```
+
+```
+SyncSentry Report
+Asset: asset.mkv
+------------------------------------------------------------
+A/V sync    : detected +180ms -> FIXED (residual +0.0ms)
+Captions    : detected -110ms -> FIXED (residual +0.0ms)
+------------------------------------------------------------
+Overall: ✅ all issues resolved
+Output files:
+  corrected_video: out/asset.corrected.mkv
+  corrected_captions: out/asset.corrected.vtt
+```
+
+How the fix actually works (both verified against our own detectors, not
+just "ran without error" -- see `analyzer/tests/test_fixer.py`):
+
+- **A/V offset:** re-encodes just the audio track, trimming (audio lagged)
+  or padding with real silence (audio led) at the start -- see
+  [`syncsentry/fixer/av_fix.py`](analyzer/syncsentry/fixer/av_fix.py) for why
+  this isn't done via a plain `-itsoffset` remux (metadata-only timestamp
+  tricks don't survive stream copy and don't fix anything for consumers that
+  read raw frame/sample sequences, which is exactly what this project's own
+  detectors do -- found the hard way, see `docs/RESEARCH.md`).
+- **Caption drift:** rewrites every cue's timestamp by the detected offset.
+  Crucially, drift is re-measured against the *corrected* video's audio, not
+  the original -- because trimming/padding the audio track shifts its whole
+  timeline, so measuring against the original would silently give the wrong
+  correction for the new file (composing two corrections algebraically is
+  error-prone; re-measuring against the actual output at each step isn't).
 
 ## Quickstart
 
@@ -131,14 +172,17 @@ pip install -r requirements-core.txt && pip install -e .
 # Generate a synthetic fixture with a known 150ms A/V offset + matching captions
 syncsentry gen-fixture --out fixtures/demo.mkv --offset-ms 150 --captions
 
-# Detect it
+# Detect only
 syncsentry detect-offset --video fixtures/demo.mkv
 syncsentry check-captions --video fixtures/demo.mkv --captions fixtures/demo.vtt
+
+# Detect AND fix, with a short report
+syncsentry fix --video fixtures/demo.mkv --captions fixtures/demo.vtt --out-dir out/
 
 # Reproduce the full benchmark suite + charts
 syncsentry benchmark --out-dir ../benchmark/results
 
-# Run the test suite (18 cases, offset-recovery + edge cases)
+# Run the test suite (32 cases: offset-recovery, fix round-trips, pipeline e2e)
 pytest tests/ -v
 ```
 
@@ -161,10 +205,12 @@ analyzer/            Python package (syncsentry): detectors, synth fixtures, CLI
     synth/            Ground-truth fixture generator
     detectors/        Coarse A/V offset detector (cross-correlation)
     captions/         Caption-vs-speech drift checker
+    fixer/            Applies A/V offset + caption drift corrections
     lipsync/          Tier 2 learned per-scene model (in progress)
-    report/           Benchmark harness (markdown + chart generation)
+    report/           Benchmark harness + short human-readable report
+    pipeline.py       End-to-end detect -> fix -> re-measure orchestration
     util/             ffmpeg/ffprobe/OpenCV wrappers
-  tests/              Recovery-accuracy pytest suite
+  tests/              Recovery-accuracy + fix round-trip + e2e pytest suite
 benchmark/results/    Generated benchmark tables + charts (reproducible, committed)
 services/orchestrator/  Go orchestration/API service (in progress)
 docs/
