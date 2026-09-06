@@ -1,0 +1,8 @@
+numpy>=1.26
+scipy>=1.11
+soundfile>=0.12
+opencv-python-headless>=4.9
+matplotlib>=3.8
+pydantic>=2.6
+pytest>=8.0
+webvtt-py>=0.4.6

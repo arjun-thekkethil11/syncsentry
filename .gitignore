@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Generated media (regenerate via `syncsentry benchmark` / `gen-fixture`)
+analyzer/fixtures/*.mkv
+analyzer/fixtures/*.mp4
+analyzer/fixtures/*.vtt
+benchmark/results/_fixtures/
+
+# Go
+services/orchestrator/bin/
+.pytest_cache
+
+# Analyzer editable install metadata
+analyzer/*.egg-info/
+
+# OS
+.DS_Store
