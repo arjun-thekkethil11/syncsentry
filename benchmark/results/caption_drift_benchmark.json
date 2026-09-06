@@ -3,7 +3,7 @@
     "injected_ms": -300,
     "median_estimated_ms": -299.99999999999983,
     "error_ms": 0.0,
-    "matched_cues": 10,
+    "matched_cues": 9,
     "unmatched_cues": 0,
     "flagged_cues": 9
   },
@@ -11,7 +11,7 @@
     "injected_ms": -200,
     "median_estimated_ms": -200.00000000000017,
     "error_ms": -0.0,
-    "matched_cues": 10,
+    "matched_cues": 9,
     "unmatched_cues": 0,
     "flagged_cues": 9
   },
@@ -19,7 +19,7 @@
     "injected_ms": -120,
     "median_estimated_ms": -120.00000000000011,
     "error_ms": -0.0,
-    "matched_cues": 10,
+    "matched_cues": 9,
     "unmatched_cues": 0,
     "flagged_cues": 9
   },
@@ -27,7 +27,7 @@
     "injected_ms": -80,
     "median_estimated_ms": -80.00000000000007,
     "error_ms": -0.0,
-    "matched_cues": 10,
+    "matched_cues": 9,
     "unmatched_cues": 0,
     "flagged_cues": 8
   },
@@ -35,7 +35,7 @@
     "injected_ms": -30,
     "median_estimated_ms": -30.00000000000003,
     "error_ms": -0.0,
-    "matched_cues": 10,
+    "matched_cues": 9,
     "unmatched_cues": 0,
     "flagged_cues": 0
   },
@@ -43,15 +43,15 @@
     "injected_ms": 0,
     "median_estimated_ms": 0.0,
     "error_ms": 0.0,
-    "matched_cues": 10,
+    "matched_cues": 9,
     "unmatched_cues": 0,
     "flagged_cues": 0
   },
   {
     "injected_ms": 30,
-    "median_estimated_ms": 29.999999999999915,
-    "error_ms": -0.0,
-    "matched_cues": 10,
+    "median_estimated_ms": 30.00000000000003,
+    "error_ms": 0.0,
+    "matched_cues": 9,
     "unmatched_cues": 0,
     "flagged_cues": 0
   },
@@ -59,7 +59,7 @@
     "injected_ms": 80,
     "median_estimated_ms": 80.00000000000007,
     "error_ms": 0.0,
-    "matched_cues": 10,
+    "matched_cues": 9,
     "unmatched_cues": 0,
     "flagged_cues": 9
   },
@@ -67,24 +67,24 @@
     "injected_ms": 120,
     "median_estimated_ms": 120.00000000000011,
     "error_ms": 0.0,
-    "matched_cues": 10,
+    "matched_cues": 9,
     "unmatched_cues": 0,
-    "flagged_cues": 10
+    "flagged_cues": 9
   },
   {
     "injected_ms": 200,
     "median_estimated_ms": 200.00000000000017,
     "error_ms": 0.0,
-    "matched_cues": 10,
+    "matched_cues": 9,
     "unmatched_cues": 0,
-    "flagged_cues": 10
+    "flagged_cues": 9
   },
   {
     "injected_ms": 300,
     "median_estimated_ms": 299.99999999999983,
     "error_ms": -0.0,
-    "matched_cues": 10,
+    "matched_cues": 9,
     "unmatched_cues": 0,
-    "flagged_cues": 10
+    "flagged_cues": 9
   }
 ]

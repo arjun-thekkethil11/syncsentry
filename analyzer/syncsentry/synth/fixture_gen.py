@@ -108,12 +108,26 @@ def generate_captions(out_vtt: str | Path, spec: FixtureSpec, caption_offset_ms:
     audio pulse times (the ground truth "speech" proxy), independent of any
     video offset. This models the real-world failure mode: captions are
     authored/retimed against the wrong reference track.
+
+    Cue generation starts at k=1 (skipping the pulse at t=0), not k=0. WebVTT
+    timestamps can't be negative, so a large negative caption_offset_ms would
+    otherwise silently clamp the very first cue's ground-truth start time to
+    0.000 -- corrupting that one cue's ground truth without erroring, which
+    is exactly the kind of thing that's obvious in hindsight and invisible
+    until a round-trip test catches it (it did: see
+    tests/test_fixer.py::test_caption_fix_round_trip). Starting at k=1 gives
+    every cue a full `period_s` of head-room, comfortably more than the
+    +/-300ms offsets exercised in this project's tests/benchmarks.
     """
     out_vtt = Path(out_vtt)
     out_vtt.parent.mkdir(parents=True, exist_ok=True)
 
     def fmt(t: float) -> str:
-        t = max(0.0, t)
+        if t < 0.0:
+            raise ValueError(
+                f"caption cue start {t:.3f}s is negative -- increase period_s or reduce "
+                f"caption_offset_ms so every cue keeps positive head-room."
+            )
         h = int(t // 3600)
         m = int((t % 3600) // 60)
         s = t % 60
@@ -121,7 +135,7 @@ def generate_captions(out_vtt: str | Path, spec: FixtureSpec, caption_offset_ms:
 
     n_pulses = int(spec.duration_s // spec.period_s)
     lines = ["WEBVTT", ""]
-    for k in range(n_pulses):
+    for k in range(1, n_pulses):
         true_start = k * spec.period_s
         start = true_start + caption_offset_ms / 1000.0
         end = start + cue_len_ms / 1000.0
