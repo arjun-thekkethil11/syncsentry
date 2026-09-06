@@ -77,6 +77,26 @@ def test_classify_drift_endpoint(tmp_path):
     assert body["slope_ms_per_s"] > 0
 
 
+def test_dialogue_scenes_endpoint_finds_none_in_synthetic_fixture(tmp_path):
+    # The synthetic flash+beep fixture has no real face and no real speech,
+    # so the real face-detector + VAD-backed endpoint should correctly find
+    # zero dialogue scenes -- a real negative result, not a mocked one. See
+    # tests/test_dialogue_scenes_real.py for the positive-case validation
+    # against genuine human faces/speech (skipped in CI by design).
+    spec = FixtureSpec(duration_s=6.0, period_s=1.0, pulse_ms=80)
+    video = generate_fixture(tmp_path / "no_dialogue.mkv", spec)
+
+    with video.open("rb") as vf:
+        resp = client.post(
+            "/v1/dialogue-scenes",
+            files={"video": ("no_dialogue.mkv", vf, "video/x-matroska")},
+        )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["n_scenes"] == 0
+    assert body["scenes"] == []
+
+
 def test_fix_endpoint_video_only(tmp_path):
     spec = FixtureSpec(duration_s=6.0, period_s=2.0, pulse_ms=80, offset_ms=0.0)
     video = generate_fixture(tmp_path / "clean.mkv", spec)

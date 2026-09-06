@@ -38,6 +38,48 @@ detection is.
   synthetic ground truth with a time-varying injected offset
   (`generate_piecewise_offset_fixture`) -- see `docs/ROADMAP.md`, M3a.
 
+## 1b. Real content exposes exactly why the coarse detector isn't enough
+
+M3a's per-window estimator (confidence-gated Tier-1 cross-correlation) was
+validated only against synthetic flash+beep content, where global frame
+brightness *is* the signal by construction. M3b fetched a real, permissively
+licensed talking-head clip (CC BY 3.0, see
+`analyzer/fixtures/real_content/SOURCES.md`) specifically to test that
+assumption against genuine human speech and a genuine face, and it failed
+in an informative way:
+
+- **A single global estimate on real content produces a confident-looking
+  but meaningless number.** The clip's audio and video are genuinely in
+  sync (injected offset: none). `estimate_av_offset` on it reports
+  `offset_ms=880.0` with `confidence=-0.039` -- a negative confidence
+  correctly flags this as garbage, but only because the confidence
+  calculation happens to go negative here; it isn't a principled bound.
+- **The per-window confidence gate (>= 0.3, M3a's guard against exactly
+  this) is not sufficient either.** Sliding a 3s window across the same
+  clip, 12 of ~29 windows pass the >= 0.3 confidence threshold -- but their
+  offset estimates are `{65, 185, 125, 440, 0, -85, 115, 480, 190, 185, 0,
+  0}` ms against a true offset of 0ms throughout. Global frame brightness in
+  a real talking-head shot (camera holds still, hands and head move,
+  lighting doesn't pulse) occasionally correlates with the audio energy
+  envelope by coincidence -- often enough to clear a confidence bar tuned
+  against clean synthetic pulses, while still being the wrong signal
+  entirely. This is a stronger and more specific finding than "the detector
+  can be uncertain": it shows that a global-brightness confidence score is
+  not a reliable arbiter of *its own trustworthiness* on real content.
+- **This is precisely the gap DiVAS/SyncNet-family models close.** They
+  don't correlate whole-frame brightness with whole-signal audio energy;
+  they extract localized (mouth-region) visual embeddings and compare them
+  against audio embeddings in a learned representation space, so a hand
+  gesture or a lighting change isn't mistaken for a mouth movement. M3b's
+  real-content test suite
+  (`analyzer/tests/test_dialogue_scenes_real.py::test_tier1_coarse_detector_is_unreliable_on_real_dialogue_content`)
+  pins this finding as a regression test -- asserting the *global* estimate's
+  confidence stays low, which is the one part of this behavior we do want to
+  rely on (never trust a single global estimate on real content without
+  restricting to a scene with a real face and real speech first, which is
+  exactly what `syncsentry/lipsync/dialogue_scenes.py` does before any
+  learned estimator gets to run).
+
 ## 2. Lip-sync detection has moved from heuristic offset search to learned contrastive embeddings
 
 The original **[SyncNet](http://arxiv.org/pdf/2005.08606v1)** approach and
@@ -59,6 +101,45 @@ candidate offset to pick the true offset.
   coarse envelope-correlation detector in Milestone 1/2, which works on any
   content but only detects a single global offset and can't resolve
   sub-frame lip-sync-level drift.
+- **"Dialogue scene" itself now has a real (not stubbed) definition.**
+  M3b implements `syncsentry/lipsync/dialogue_scenes.py`: face-on-screen
+  (OpenCV YuNet, see 2b below) intersected with speech-active (Silero VAD)
+  time ranges, gap-merged and minimum-duration-filtered. Validated against
+  the real clip above: 4 scenes, 25.8s of 50.0s total (52%), matching a
+  manual visual check of the footage (the interview cuts to lab-bench props
+  and demonstrations for the rest). This is the scene *localization* half
+  of M3b; swapping in the pretrained embedding model as the per-scene
+  *estimator* (replacing Tier-1 inside those scenes) is the remaining piece.
+
+## 2b. Real face detection has its own platform gotchas -- and a smaller model was the fix
+
+Building M3b surfaced a concrete, and non-obvious, engineering finding
+worth documenting alongside the ML ones above: **mediapipe's modern Tasks
+API (>=0.10, the current recommended face-detection entry point) crashes on
+this project's macOS execution environment**, even when a CPU delegate is
+explicitly requested:
+
+```
+F0000 ... graph_service.h:139] Check failed: service_ Service is unavailable.
+    @ ... -[DrishtiMetalHelper initWithCalculatorContext:]
+    @ ... mediapipe::api2::TensorsToDetectionsCalculator::Open()
+```
+
+The detection calculator unconditionally initializes a Metal-backed GPU
+helper as part of its image-container conversion path, independent of the
+delegate requested for the actual tensor inference -- and Metal is
+unavailable in this sandboxed/headless execution context. Rather than work
+around a GPU-service dependency for what's fundamentally a small CPU-sized
+model, M3b switched to `cv2.FaceDetectorYN` (OpenCV's DNN-backed YuNet
+face detector, from [opencv_zoo](https://github.com/opencv/opencv_zoo),
+Apache-2.0): a ~230KB ONNX model, pure CPU inference through OpenCV's own
+DNN backend, no GPU dependency at all. Validated against the same real
+clip: face detected in 24/50 one-per-second sampled frames (48%,
+confidence 0.84-0.95 when present), consistent with the interview's actual
+on-camera/cutaway ratio. Same job, no platform-specific crash -- and the
+project already depended on OpenCV for the video-brightness envelope
+(`syncsentry/util/ffmpeg_io.py`), so this didn't add a new dependency
+family, just a new model file.
 
 ## 3. Coarse, model-free detection is a legitimate first tier, with a known limitation
 
@@ -97,9 +178,19 @@ picture cut points is the only way to catch that class of bug.
   ignores the video track and compares WebVTT cue timing only against
   audio-derived speech/onset activity, so "caption vs. speech" drift and
   "picture vs. audio" drift are measured -- and can be root-caused --
-  independently. Milestone 3 swaps the current energy-threshold onset
-  picker for a proper VAD (e.g. Silero-VAD) so this works on real speech,
-  not just synthetic tone bursts.
+  independently.
+- **M3b adds real VAD (Silero-VAD) as a separate module
+  (`syncsentry/lipsync/vad.py`)** rather than swapping it directly into
+  `drift_check.py` yet. Validated against the real clip: 10 speech segments
+  covering ~46s of the 50s clip (continuous talking, as expected), versus
+  zero segments detected on the synthetic tone-pulse fixture -- confirming
+  Silero VAD is doing something meaningfully different from (and not a
+  drop-in replacement for, on synthetic content) the energy-threshold onset
+  picker `drift_check.py` still uses today. Wiring real VAD into the
+  caption checker itself, so it also works against real speech, is
+  deferred until there's a real captioned asset to validate that swap
+  against -- the same "don't build untested against content that can't
+  exercise the code path" discipline as M3a.
 
 ## 4b. Fixing sync drift is not the mirror image of detecting it
 

@@ -1,7 +1,12 @@
 numpy>=1.26
 scipy>=1.11
 soundfile>=0.12
-opencv-python-headless>=4.9
+# contrib-headless (not plain opencv-python-headless) because M3b's face
+# detector uses cv2.FaceDetectorYN; headless because CI/servers have no
+# display. Only ONE opencv variant should ever be installed at a time --
+# opencv-python / opencv-contrib-python / their -headless counterparts all
+# ship a top-level `cv2` package and silently conflict if mixed.
+opencv-contrib-python-headless>=4.9
 matplotlib>=3.8
 pydantic>=2.6
 pytest>=8.0

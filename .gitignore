@@ -13,6 +13,13 @@ analyzer/fixtures/*.mp4
 analyzer/fixtures/*.vtt
 benchmark/results/_fixtures/
 
+# Real (third-party) content used for M3b validation -- never committed,
+# even under a permissive license. Re-fetch via
+# analyzer/scripts/fetch_real_content.sh. Only SOURCES.md (provenance +
+# license + fetch instructions) is tracked.
+analyzer/fixtures/real_content/*
+!analyzer/fixtures/real_content/SOURCES.md
+
 # Go
 services/orchestrator/bin/
 .pytest_cache

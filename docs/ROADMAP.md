@@ -81,22 +81,55 @@ actually implemented and tested, not aspirational scope.
         scenes (face + speech-activity overlap). Both are deferred to
         **M3b** below rather than built untested against synthetic content
         that has no faces in it.
-- [ ] **M3b -- Learned per-scene estimator + real dialogue-scene detection
-      (deferred until real content is available).**
-      - Dialogue-scene detection (mediapipe face detection + real
-        speech-activity overlap, e.g. Silero-VAD) -- both installed and
-        confirmed working (PyTorch 2.14 on Apple Silicon MPS; see commit
-        history), but not meaningfully unit-testable without real
-        face/speech content, which is why this is sequenced after M3a's
-        purely statistical layer rather than before it.
+- [x] **M3b -- Real dialogue-scene detection (sourced real content to
+      validate against).**
+      - Sourced a small, permissively-licensed (CC BY 3.0) real talking-head
+        clip from Wikimedia Commons specifically to test face detection and
+        VAD against genuine faces/speech -- never committed to the repo
+        (`analyzer/fixtures/real_content/SOURCES.md` documents the source +
+        license; `analyzer/scripts/fetch_real_content.sh` reproducibly
+        re-fetches it).
+      - Real face detection: `syncsentry/lipsync/face_detect.py`, using
+        OpenCV's `cv2.FaceDetectorYN` (YuNet, opencv_zoo) instead of the
+        originally-planned mediapipe -- mediapipe's Tasks API crashes on
+        this project's macOS execution environment (Metal GPU service
+        unavailable even under a CPU delegate; see `docs/RESEARCH.md`
+        section 2b). Validated: face detected in 24/50 sampled frames of the
+        real clip (48%, confidence 0.84-0.95 when present), matching a
+        manual check of the footage.
+      - Real speech detection: `syncsentry/lipsync/vad.py`, using Silero-VAD
+        (pip package, bundled weights). Validated: 10 speech segments
+        covering ~46s of a 50s continuous-talking clip, vs. zero segments on
+        the synthetic tone-pulse fixture (confirms it's doing something
+        real, not just firing on any loud signal like the caption checker's
+        onset picker does).
+      - Real dialogue-scene detection: `syncsentry/lipsync/dialogue_scenes.py`
+        intersects face-presence and speech-activity intervals (merging
+        small gaps, dropping sub-1s scenes). Validated: 4 scenes, 25.8s of
+        50.0s (52%) on the real clip, matching a manual visual check.
+        New CLI command (`syncsentry dialogue-scenes`) and API endpoint
+        (`POST /v1/dialogue-scenes`).
+      - **A concrete finding motivating M3c below:** run against the same
+        real (in-sync) clip, M3a's Tier-1 windowed estimator passes its
+        confidence gate on 12 windows whose offset estimates range from 0ms
+        to 480ms -- all "confident," none reliable, because global frame
+        brightness only spuriously correlates with real speech energy. See
+        `docs/RESEARCH.md` section 1b. 10 new tests (6 synthetic/CI-safe, 4
+        real-content, auto-skipped when the fixture isn't fetched locally).
+      - 53 pytest cases total (11 new: 6 dialogue-scene unit tests, 4
+        real-content validation tests -- auto-skipped in CI, 1 API endpoint
+        test).
+- [ ] **M3c -- Learned per-scene estimator (deferred until there's a way to
+      validate it against real, ideally annotated, drift).**
       - Swap the per-window estimator in `scene_offsets.py` for a
-        SyncNet-family pretrained embedding model -- the interface
-        (`list[SceneOffset]` in, same `title_drift` classification code) is
-        already designed for this to be a drop-in replacement.
-      - Real VAD (Silero) for the caption checker, replacing the
-        energy-threshold onset picker for real speech (kept as the default
-        for synthetic-tone fixtures, where a speech-specific VAD wouldn't
-        even fire).
+        SyncNet-family pretrained embedding model, restricted to the real
+        dialogue scenes M3b now detects -- the interface (`list[SceneOffset]`
+        in, same `title_drift` classification code) is already designed for
+        this to be a drop-in replacement.
+      - Real VAD (Silero, from M3b) wired into the caption checker itself,
+        replacing the energy-threshold onset picker for real speech (kept as
+        the default for synthetic-tone fixtures, where a speech-specific VAD
+        wouldn't even fire).
 - [ ] **M4 -- Go orchestrator: catalog batch runner.**
       - Job queue + asset state (Postgres), scheduling across a catalog of
         many assets, calling the Python API (M2.6) as a worker.

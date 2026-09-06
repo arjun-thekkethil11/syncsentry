@@ -26,6 +26,7 @@ from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from syncsentry import __version__
+from syncsentry.lipsync.dialogue_scenes import detect_dialogue_scenes
 from syncsentry.lipsync.scene_offsets import estimate_windowed_offsets
 from syncsentry.lipsync.title_drift import classify_title_drift
 from syncsentry.pipeline import run_fix_pipeline
@@ -116,6 +117,35 @@ async def classify_drift(video: UploadFile = File(...), window_s: float = 3.0) -
         "n_scenes": result.n_scenes,
         "intermittent_window_s": result.intermittent_window_s,
         "intermittent_offset_ms": result.intermittent_offset_ms,
+    }
+
+
+@app.post("/v1/dialogue-scenes")
+async def dialogue_scenes(video: UploadFile = File(...), sample_fps: float = 2.0,
+                           min_duration_s: float = 1.0) -> dict:
+    """Upload a video, get back real dialogue scenes: time ranges where a
+    face is on screen AND speech is active (YuNet face detection + Silero
+    VAD, see docs/RESEARCH.md M3b). This is the scene-localization half of
+    the learned per-scene estimator work; it does not itself estimate an
+    offset (that's `/v1/classify-drift`, still backed by the Tier-1
+    detector -- see the M3b finding in docs/RESEARCH.md on why that
+    detector alone isn't trustworthy on real dialogue content).
+    """
+    job_id = uuid.uuid4().hex[:12]
+    job_dir = _RUNS_DIR / job_id
+    job_dir.mkdir(parents=True)
+    video_path = job_dir / video.filename
+    with video_path.open("wb") as f:
+        shutil.copyfileobj(video.file, f)
+
+    scenes = detect_dialogue_scenes(
+        str(video_path), sample_fps=sample_fps, min_duration_s=min_duration_s,
+    )
+    return {
+        "job_id": job_id,
+        "n_scenes": len(scenes),
+        "total_duration_s": sum(s.end_s - s.start_s for s in scenes),
+        "scenes": [{"start_s": s.start_s, "end_s": s.end_s} for s in scenes],
     }
 
 
