@@ -23,13 +23,20 @@ scenes to classify which failure mode is present and how confident the
 detection is.
 
 - **Decision this drives:** SyncSentry's coarse detector
-  (`syncsentry/detectors/coarse_xcorr.py`) currently estimates a single
-  global offset per asset -- that's Milestone 1/2. Milestone 3
-  (`syncsentry/detectors/title_drift.py`, not yet built) will add DiVAS's
-  per-scene + RANSAC title-level classification on top of it, which is the
-  only way to tell "this whole title is 80ms out" apart from "this title
-  drifts progressively worse from minute 40 onward" -- two very different
-  remediation paths in a real content-ops workflow.
+  (`syncsentry/detectors/coarse_xcorr.py`) estimates a single global offset
+  per asset (Milestone 1/2). Milestone 3a
+  (`syncsentry/lipsync/title_drift.py`) implements DiVAS's per-scene +
+  RANSAC title-level classification *on top of* that detector -- windowing
+  it across a title (`syncsentry/lipsync/scene_offsets.py`) instead of
+  swapping in a learned model yet (that's M3b, gated on having real
+  face/speech content to validate against). The classification layer itself
+  is model-agnostic: it consumes a list of (scene_time, offset,
+  confidence) tuples regardless of what produced them, so M3b's pretrained
+  embedding model slots into the exact same `title_drift.classify_title_drift`
+  without changing it. Validated on all five patterns (in_sync,
+  constant_offset, drift_increasing, drift_decreasing, intermittent) against
+  synthetic ground truth with a time-varying injected offset
+  (`generate_piecewise_offset_fixture`) -- see `docs/ROADMAP.md`, M3a.
 
 ## 2. Lip-sync detection has moved from heuristic offset search to learned contrastive embeddings
 

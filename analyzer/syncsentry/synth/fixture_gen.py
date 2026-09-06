@@ -100,6 +100,70 @@ def generate_fixture(out_path: str | Path, spec: FixtureSpec) -> Path:
     return out_path
 
 
+def _synthesize_audio_piecewise(duration_s: float, sr: int, period_s: float, pulse_ms: float,
+                                 tone_hz: float, control_points: list[tuple[float, float]]) -> np.ndarray:
+    """Same gated-sine-burst synthesis as `_synthesize_audio`, but the A/V
+    offset at time t is linearly interpolated between `control_points`
+    (t_seconds, offset_ms) instead of held constant. This is what lets us
+    build synthetic "drift-early", "drift-late", and "intermittent" titles
+    for testing `syncsentry.lipsync.title_drift` -- the same ground-truth-
+    injection methodology as the rest of this project, just with a
+    time-varying offset instead of a single number.
+    """
+    n = int(round(duration_s * sr))
+    t = np.arange(n, dtype=np.float64) / sr
+    cp_t = np.array([c[0] for c in control_points])
+    cp_off_s = np.array([c[1] / 1000.0 for c in control_points])
+    offset_at_t = np.interp(t, cp_t, cp_off_s)
+
+    pulse_s = pulse_ms / 1000.0
+    phase = np.mod(t - offset_at_t, period_s)
+    gate = (phase < pulse_s).astype(np.float64)
+    tone = np.sin(2.0 * np.pi * tone_hz * t)
+    return (gate * tone).astype(np.float32)
+
+
+def generate_piecewise_offset_fixture(out_path: str | Path, duration_s: float,
+                                       control_points: list[tuple[float, float]],
+                                       period_s: float = 2.0, pulse_ms: float = 80.0,
+                                       fps: float = 25.0, sr: int = 48000,
+                                       tone_hz: float = 1000.0,
+                                       width: int = 320, height: int = 240) -> Path:
+    """Like `generate_fixture`, but the injected A/V offset varies over time
+    per `control_points` (a list of (t_seconds, offset_ms) waypoints,
+    linearly interpolated). Video pulses stay at the fixed reference
+    (mod(t, period) < pulse_s); only the audio pulses' timing follows the
+    offset schedule.
+    """
+    ffmpeg = _require_binary("ffmpeg")
+    out_path = Path(out_path)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if out_path.suffix.lower() != ".mkv":
+        raise ValueError("generate_piecewise_offset_fixture expects an .mkv output path.")
+
+    video_gate = f"lt(mod(t,{period_s}),{pulse_ms / 1000.0})"
+
+    with tempfile.TemporaryDirectory() as td:
+        wav_path = Path(td) / "audio.wav"
+        audio = _synthesize_audio_piecewise(duration_s, sr, period_s, pulse_ms, tone_hz, control_points)
+        sf.write(str(wav_path), audio, sr, subtype="PCM_16")
+
+        args = [
+            ffmpeg, "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", f"color=c=black:s={width}x{height}:r={fps}:d={duration_s}",
+            "-i", str(wav_path),
+            "-filter_complex",
+            f"[0:v]drawbox=x=0:y=0:w=iw:h=ih:color=white:t=fill:enable='{video_gate}'[v]",
+            "-map", "[v]", "-map", "1:a",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-c:a", "pcm_s16le",
+            "-shortest",
+            str(out_path),
+        ]
+        run(args)
+    return out_path
+
+
 def generate_captions(out_vtt: str | Path, spec: FixtureSpec, caption_offset_ms: float = 0.0,
                        cue_len_ms: float = 700.0) -> Path:
     """Write a WebVTT file with one cue per audio pulse, optionally drifted.

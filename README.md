@@ -162,6 +162,46 @@ just "ran without error" -- see `analyzer/tests/test_fixer.py`):
   correction for the new file (composing two corrections algebraically is
   error-prone; re-measuring against the actual output at each step isn't).
 
+## Title-level drift classification (M3a)
+
+Beyond a single global offset, SyncSentry can tell apart *why* a title is
+out of sync -- following DiVAS (CVPR 2024): a robust (RANSAC) line fit
+across per-window offset estimates classifies the whole title as one of
+`in_sync`, `constant_offset`, `drift_increasing`, `drift_decreasing`,
+`intermittent`, or `unstable`.
+
+```bash
+syncsentry classify-drift --video asset.mkv
+```
+
+```
+Title drift pattern : intermittent
+Slope                : -0.05 ms/s
+Intercept            : +1.14 ms
+Inlier ratio         : 0.70 (10 scenes analyzed)
+Intermittent window  : 7.5s - 10.5s (offset ~+247ms)
+```
+
+The per-window *estimator* here is still the Tier-1 signal-processing
+detector (M3b swaps it for a learned lip-sync embedding model once real
+face/speech content is available to validate against -- see
+[`docs/ROADMAP.md`](docs/ROADMAP.md)); the classification logic itself is
+already the real, tested DiVAS-style contribution.
+
+## HTTP API
+
+```bash
+uvicorn syncsentry.api:app --port 8000
+curl -F "video=@asset.mkv" -F "captions=@asset.vtt" http://localhost:8000/v1/fix
+curl -F "video=@asset.mkv" http://localhost:8000/v1/classify-drift
+```
+
+Thin by design -- every endpoint calls straight into the same
+`pipeline`/`title_drift` code the CLI and test suite use, so there's no
+logic that only exists in the API layer. This is the Python-side ML/analysis
+worker; the Go `orchestrator` service (M4) will front it for catalog-scale
+batch scheduling rather than duplicate its logic.
+
 ## Quickstart
 
 ```bash
@@ -182,7 +222,8 @@ syncsentry fix --video fixtures/demo.mkv --captions fixtures/demo.vtt --out-dir 
 # Reproduce the full benchmark suite + charts
 syncsentry benchmark --out-dir ../benchmark/results
 
-# Run the test suite (32 cases: offset-recovery, fix round-trips, pipeline e2e)
+# Run the test suite (42 cases: offset-recovery, fix round-trips, pipeline
+# e2e, title-drift classification, API e2e)
 pytest tests/ -v
 ```
 
@@ -206,11 +247,13 @@ analyzer/            Python package (syncsentry): detectors, synth fixtures, CLI
     detectors/        Coarse A/V offset detector (cross-correlation)
     captions/         Caption-vs-speech drift checker
     fixer/            Applies A/V offset + caption drift corrections
-    lipsync/          Tier 2 learned per-scene model (in progress)
+    lipsync/          M3a windowed per-scene offsets + RANSAC title-drift
+                      classification (M3b learned estimator: in progress)
     report/           Benchmark harness + short human-readable report
     pipeline.py       End-to-end detect -> fix -> re-measure orchestration
+    api.py            FastAPI HTTP service (thin wrapper over pipeline/lipsync)
     util/             ffmpeg/ffprobe/OpenCV wrappers
-  tests/              Recovery-accuracy + fix round-trip + e2e pytest suite
+  tests/              Recovery, fix round-trip, e2e, drift-classification, API tests
 benchmark/results/    Generated benchmark tables + charts (reproducible, committed)
 services/orchestrator/  Go orchestration/API service (in progress)
 docs/
