@@ -140,6 +140,37 @@ default `syncsentry fix` path most users hit first. The coarse detector
 (with its honest confidence gate, §1c) stays the fast default; SyncNet is
 the accurate-but-slow tier for when it matters.
 
+## 1f. Multi-speaker dialogue defeats both detectors -- for different, real reasons
+
+A third real user report, on a different real video: a ~30s two-person
+"skit" clip (two people talking to each other, cut with camera zooms, plus
+a non-face outro card in the last few seconds). Both detectors agreed on
+*direction* (`audio_leads`) but wildly disagreed on *magnitude* (-55ms
+coarse vs -320ms SyncNet), and SyncNet itself produced 4 short face tracks
+that disagreed with each other (0/7/9/10 frames) at low confidence
+(0.25-0.81, well below the ~4-8.5 seen on the single-narrator validation
+clip in §1e).
+
+Root cause, confirmed by pulling actual frames: this is genuinely a harder
+case than either detector was built/validated for. SyncNet's per-track
+distance metric compares *one* face's lip motion against the *whole* mixed
+audio track; when that face isn't the one currently speaking (the other
+person is, mid-conversation), that's real noise, not model error -- this is
+exactly why active-speaker detection (ASD; e.g. TalkNet) is its own
+research subfield, a prerequisite this project doesn't yet implement. The
+coarse detector has the analogous problem at the whole-frame level. Camera
+cuts additionally fragment face tracks (explaining the 4 short,
+disagreeing tracks instead of 1-3 consistent ones).
+
+**Conclusion, not yet a fix:** both detectors' low-confidence output was
+the *honest* response here, not a bug -- for a single continuous narrator
+(§1e), the tools work; for genuine back-and-forth dialogue, they
+legitimately can't pin a reliable global offset yet. A real next step
+would be active-speaker-aware analysis (attribute each moment to whichever
+person is actually talking before running SyncNet on just that speaker's
+track against just that moment's audio) -- scoped as a future milestone,
+not built here.
+
 ## 2. Lip-sync detection has moved to learned contrastive embeddings
 
 [SyncNet](http://arxiv.org/pdf/2005.08606v1) and successors --
