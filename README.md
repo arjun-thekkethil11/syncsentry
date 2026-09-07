@@ -40,8 +40,9 @@ Tier 1 (`analyzer/`, Python) is fast (seconds) and is the default. Tier 2
 (`--use-syncnet`) is a pretrained model that's far more accurate on real
 talking-head content but takes minutes per video (real face
 tracking + a CNN, CPU) -- opt-in, not the silent default. The Go
-orchestrator (`services/orchestrator/`) is scaffolded for catalog-scale
-batch runs (M4).
+orchestrator (`services/orchestrator/`) turns either tier into a
+catalog-scale batch runner: a Postgres-backed job queue with concurrent
+workers calling the Python API over HTTP (M4).
 
 ## Benchmark results
 
@@ -116,6 +117,37 @@ detection + real VAD, independently validated) is the trustworthy half of
 that finding; `syncsentry fix --use-syncnet` is the fix (a real pretrained
 estimator, see above), just not yet plumbed into `classify-drift` itself.
 
+## Catalog batch runner (Go orchestrator)
+
+For processing many assets rather than one at a time: a Postgres-backed
+job queue in front of the same Python API above.
+
+```bash
+# 1. Postgres (docker compose, or any reachable Postgres + `SYNCSENTRY_DATABASE_URL`)
+cd services/orchestrator && docker compose up -d
+
+# 2. the analyzer API (from analyzer/, .venv active)
+uvicorn syncsentry.api:app --port 8000
+
+# 3. the orchestrator
+cd services/orchestrator && go build -o bin/orchestrator . && ./bin/orchestrator
+
+# 4. submit + poll a job
+curl -s -X POST localhost:8080/jobs -H "Content-Type: application/json" \
+  -d '{"video_path": "/absolute/path/to/asset.mkv", "use_syncnet": false}'
+curl -s localhost:8080/jobs/<id>
+curl -s "localhost:8080/jobs?status=queued"
+```
+
+`POST /jobs` enqueues by path (shared/local disk -- the analyzer API
+already has a multipart upload endpoint; this doesn't duplicate it). N
+worker goroutines (`SYNCSENTRY_WORKER_COUNT`, default 2) poll Postgres with
+`SELECT ... FOR UPDATE SKIP LOCKED` to claim jobs without racing each
+other, then call the same `/v1/fix` a human would with `curl -F`. Verified
+end-to-end against a real fixture with a known +200ms injected offset: the
+job's stored result shows `detected_offset_ms: 200.0` /
+`residual_offset_ms: 0.0` -- confirmed fixed, not just "didn't error."
+
 ## HTTP API
 
 ```bash
@@ -175,7 +207,11 @@ analyzer/            Python package: detectors, fixers, lipsync, API, CLI, tests
   scripts/            Dev tooling (fetch_real_content.sh, fetch_syncnet.sh)
   tests/
 benchmark/results/    Generated benchmark tables + charts (committed)
-services/orchestrator/  Go orchestration/API service (in progress)
+services/orchestrator/  Go catalog batch runner (M4)
+  internal/store/      Job model + Store interface (Postgres + in-memory)
+  internal/pyclient/   HTTP client calling the analyzer's /v1/fix
+  internal/worker/      Poll loop: claim job -> call pyclient -> record result
+  docker-compose.yml    Postgres for local dev
 docs/RESEARCH.md     Literature -> design-decision mapping
 docs/ROADMAP.md      Milestone status
 ```
