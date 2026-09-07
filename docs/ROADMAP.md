@@ -92,6 +92,19 @@ implemented and tested, not aspirational scope.
       not fixed -- a real fix needs active-speaker-aware analysis (attribute
       each moment to whoever's actually talking before running SyncNet),
       scoped as future work. See `docs/RESEARCH.md` §1f.
+- [x] **M3c.6 -- Windowed + cross-corroborated SyncNet (real improvement; one false positive caught and fixed).**
+      Score independent ~1s sub-windows within each face track instead of
+      only the whole-track median (non-speaking frames no longer dilute
+      the estimate) plus a boundary-artifact filter and a
+      3-independent-windows-must-agree corroboration requirement before
+      trusting a windowed answer over the whole-track fallback. First cut
+      (2 windows required) looked like a win on the §M3c.5 video -- until
+      the pipeline's own re-measurement step (not a new check, the same
+      one that caught the M2.5 bugs) showed the "fix" didn't collapse the
+      residual, proving the 2-window agreement was coincidental. Raised to
+      3; re-validated both the §1e ground-truth regression (still passes)
+      and the hard video (now correctly falls back to the same honest
+      low confidence as before, no regression). See `docs/RESEARCH.md` §1g.
 - [x] **M4 -- Go orchestrator: catalog batch runner.** Job queue + asset
       state in Postgres (`SELECT ... FOR UPDATE SKIP LOCKED` for safe
       concurrent claiming), `POST /jobs` / `GET /jobs` / `GET /jobs/{id}`,
