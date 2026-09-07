@@ -80,9 +80,31 @@ implemented and tested, not aspirational scope.
       piece of the original M3c scope:* wiring Silero-VAD into the caption
       checker itself for real speech (currently still a synthetic-pulse
       onset picker, see `docs/RESEARCH.md` §4) -- deferred, not blocking.
-- [ ] **M4 -- Go orchestrator: catalog batch runner.** Job queue + asset
-      state (Postgres), scheduling across a catalog, calling the Python
-      API (M2.6) as a worker.
+- [x] **M3c.5 -- Found the actual limit of both detectors: multi-speaker dialogue.**
+      A third real-user report, on a third real video (a two-person
+      back-and-forth clip): both the coarse detector and SyncNet agreed on
+      *direction* but disagreed sharply on *magnitude*, and SyncNet's own
+      face tracks disagreed with each other. Root-caused by inspecting
+      actual frames: genuine back-and-forth dialogue (not a single
+      continuous narrator) breaks SyncNet's per-track-vs-whole-mixed-audio
+      assumption, and camera cuts fragment face tracking. Both detectors'
+      low confidence here was the *honest* answer, not a bug. Documented,
+      not fixed -- a real fix needs active-speaker-aware analysis (attribute
+      each moment to whoever's actually talking before running SyncNet),
+      scoped as future work. See `docs/RESEARCH.md` §1f.
+- [x] **M4 -- Go orchestrator: catalog batch runner.** Job queue + asset
+      state in Postgres (`SELECT ... FOR UPDATE SKIP LOCKED` for safe
+      concurrent claiming), `POST /jobs` / `GET /jobs` / `GET /jobs/{id}`,
+      N worker goroutines calling the Python API (M2.6) over HTTP
+      (multipart upload, same as the CLI's `curl -F`). Verified end-to-end
+      against a real local Postgres + real `uvicorn` process: submitted a
+      job for a fixture with a known +200ms injected offset, worker
+      claimed it, called the analyzer API, and the job's stored result
+      showed `detected_offset_ms: 200.0` / `residual_offset_ms: 0.0` --
+      i.e. actually fixed, not just "ran without erroring." 15 Go tests
+      (unit tests with an in-memory Store + `httptest` fake analyzer API;
+      one real-Postgres integration test, opt-in via
+      `SYNCSENTRY_TEST_DATABASE_URL`, skipped otherwise).
 - [ ] **M5 -- Sync-health dashboard.** Per-title timeline visualization;
       catalog-wide drift summary.
 - [ ] **M6 -- Real-content validation + writeup.** Validate against a
