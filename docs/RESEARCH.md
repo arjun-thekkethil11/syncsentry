@@ -171,6 +171,51 @@ person is actually talking before running SyncNet on just that speaker's
 track against just that moment's audio) -- scoped as a future milestone,
 not built here.
 
+## 1g. Windowed + cross-corroborated SyncNet: a real improvement, with a real false-positive caught along the way
+
+Attempted a cheaper version of the "active-speaker-aware" idea from §1f
+without adding a third model: `SyncNetInstance.evaluate()` already computes
+a full per-frame x per-shift distance matrix internally, but the M3c
+wrapper only kept the whole-track median, diluted by frames where the
+tracked face is listening, not talking. Added `_windowed_offsets` to score
+independent ~1s sub-windows instead of the whole track, so non-speaking
+frames simply don't produce a confident window rather than dragging the
+whole track's number down.
+
+First cut (`min_cluster_size=2`: trust an offset once *any* 2 independently
+confident windows agree within 2 frames) looked like a win on the same
+video from §1f: two windows, from two different face tracks, agreed on
+~520ms (confidence 4.67, comfortably over the 3.0 bar) where nothing had
+been confident before. But the pipeline's own re-measurement discipline
+(`pipeline.py` re-detects on the corrected file rather than trusting the
+fix algebraically -- the same discipline that caught the real bugs in
+§M2.5) caught it immediately: applying that 520ms correction and
+re-measuring gave a residual of *500ms, not ~0*. A real fix collapses the
+residual; this didn't, so the 2-window agreement was a coincidence, not
+signal -- with only ~29 possible offset values and several confident
+windows in play, two of them landing within 2 frames of each other by
+chance isn't actually that unlikely.
+
+Raised the bar to `min_cluster_size=3` (three independent confident
+windows must agree, not two). Re-validated both directions: still passes
+the §1e ground-truth regression (0ms/200ms injected, single narrator --
+plenty of tight agreement there, so the stricter bar costs nothing when
+there's real signal); on the multi-speaker video, no 3-window cluster
+forms, and it correctly falls back to the same honest whole-track
+confidence (0.53, still below threshold) as before -- i.e. back to "can't
+reliably tell," which given the above is the actually correct answer for
+this asset today, not a regression.
+
+**Why this is still worth keeping despite not solving §1f's video:** the
+boundary-artifact filter (excluding windows whose best shift lands at the
+edge of the search range -- the same class of spurious-confidence failure
+as §1b, just one layer down) and the 3-window corroboration requirement
+are real robustness improvements that cost nothing on content that already
+works, and they're a more principled foundation than a single scalar
+threshold for whatever comes after this (per-speaker attribution, per
+§1f's actual proposed fix, would slot in as "windows near a
+detected-speaking segment" rather than needing new infrastructure).
+
 ## 2. Lip-sync detection has moved to learned contrastive embeddings
 
 [SyncNet](http://arxiv.org/pdf/2005.08606v1) and successors --

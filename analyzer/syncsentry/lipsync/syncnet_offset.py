@@ -28,11 +28,14 @@ audio LAGS video, matching `syncsentry.detectors.coarse_xcorr`) via
 from __future__ import annotations
 
 import argparse
+import statistics
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+
+import numpy as np
 
 _SYNCNET_DIR = Path(__file__).resolve().parent.parent.parent / "third_party" / "syncnet_python"
 _MODEL_PATH = _SYNCNET_DIR / "data" / "syncnet_v2.model"
@@ -64,10 +67,29 @@ def _check_available() -> None:
 
 
 @dataclass
+class SyncNetWindowResult:
+    """One short (~1s) sub-segment of a face track, scored independently.
+
+    Why this exists (see docs/RESEARCH.md section 1f, then 1g): a whole
+    face-track's confidence is a single median over every frame, including
+    frames where the tracked person is listening rather than talking (real
+    in multi-speaker dialogue). Those frames dilute the aggregate --
+    per-window scoring lets the pipeline find and use only the sub-segments
+    where *this specific* face's lip motion is actually confidently
+    correlated with the audio, i.e. where they're the one speaking.
+    """
+    track_index: int
+    frame_start: int
+    offset_frames: int
+    confidence: float
+
+
+@dataclass
 class SyncNetTrackResult:
     offset_frames: int  # SyncNet's own convention: positive = audio leads video
     confidence: float  # median_dist - min_dist; NOT the [0,1] scale used elsewhere
     n_frames: int
+    windows: list[SyncNetWindowResult] = field(default_factory=list)
 
 
 @dataclass
@@ -76,6 +98,7 @@ class SyncNetEstimate:
     confidence: float  # aggregated across tracks; same non-[0,1] scale as above
     direction: str  # "in_sync" | "audio_lags" | "audio_leads"
     n_tracks: int
+    n_confident_windows: int = 0  # 0 means: no window cleared the bar, fell back to whole-track aggregation
 
 
 def _run_face_track_crop(video_path: str, data_dir: Path, reference: str) -> None:
@@ -95,9 +118,53 @@ def _run_face_track_crop(video_path: str, data_dir: Path, reference: str) -> Non
         raise RuntimeError(f"SyncNet face-tracking stage failed:\n{proc.stderr[-4000:]}")
 
 
-def estimate_syncnet_tracks(video_path: str, vshift: int = 15) -> list[SyncNetTrackResult]:
+def _windowed_offsets(dist: np.ndarray, vshift: int, track_index: int,
+                       window_frames: int, step_frames: int) -> list[SyncNetWindowResult]:
+    """Slide a window over a track's per-frame x per-shift distance matrix
+    (`dist`, shape [n_frames, 2*vshift+1] -- SyncNet's own raw output,
+    already computed by `SyncNetInstance.evaluate()` but discarded by the
+    whole-track-only aggregation) and score each window exactly the way
+    SyncNet scores a whole track (mean distance per shift, then
+    median-minus-min for confidence), just over a short sub-segment
+    instead of the whole track. A window where this face's lips are
+    actually moving in sync with the audio scores high; a window where
+    they're just listening scores near the track median, i.e. low.
+    """
+    n_frames = dist.shape[0]
+    windows = []
+    for start in range(0, max(n_frames - window_frames, 0) + 1, step_frames):
+        chunk = dist[start:start + window_frames]
+        if len(chunk) < window_frames:
+            continue
+        mean_dist_per_shift = chunk.mean(axis=0)
+        minidx = int(np.argmin(mean_dist_per_shift))
+        offset_frames = vshift - minidx
+        # A minimum at the very edge of the searched shift range is the
+        # signature of a spurious/noise-dominated match (the "best" shift
+        # is an artifact of the search boundary, not a real local minimum),
+        # not a real one -- same class of false-confidence failure already
+        # documented for the coarse detector (docs/RESEARCH.md section 1b).
+        # Exclude these outright rather than let a high `conf` value (which
+        # a short, noisy window can produce just as easily at the boundary
+        # as anywhere else) make it look trustworthy.
+        if abs(offset_frames) >= vshift:
+            continue
+        minval = float(mean_dist_per_shift[minidx])
+        conf = float(np.median(mean_dist_per_shift) - minval)
+        windows.append(SyncNetWindowResult(
+            track_index=track_index, frame_start=start,
+            offset_frames=offset_frames, confidence=conf,
+        ))
+    return windows
+
+
+def estimate_syncnet_tracks(video_path: str, vshift: int = 15,
+                             window_s: float = 1.0, frame_rate: float = 25.0) -> list[SyncNetTrackResult]:
     """Run the full 2-stage SyncNet pipeline and return one result per
-    detected face track (see module docstring)."""
+    detected face track (see module docstring), each carrying both a
+    whole-track aggregate and a set of short-window sub-scores (see
+    `_windowed_offsets`) for callers that want to discount
+    listening-not-speaking frames rather than average over them."""
     _check_available()
 
     sys.path.insert(0, str(_SYNCNET_DIR))
@@ -120,27 +187,92 @@ def estimate_syncnet_tracks(video_path: str, vshift: int = 15) -> list[SyncNetTr
         s = SyncNetInstance()
         s.loadParameters(str(_MODEL_PATH))
 
+        window_frames = max(int(round(window_s * frame_rate)), 1)
         results = []
-        for crop_file in crop_files:
+        for track_index, crop_file in enumerate(crop_files):
             offset, conf, dist = s.evaluate(opt, videofile=str(crop_file))
+            windows = _windowed_offsets(dist, vshift, track_index,
+                                         window_frames=window_frames, step_frames=window_frames)
             results.append(SyncNetTrackResult(
                 offset_frames=int(offset), confidence=float(conf), n_frames=len(dist),
+                windows=windows,
             ))
         return results
 
 
+def _largest_agreeing_cluster(windows: list[SyncNetWindowResult],
+                               tolerance_frames: int = 2) -> list[SyncNetWindowResult]:
+    """Group windows whose offsets agree within `tolerance_frames` and
+    return the largest such group.
+
+    Why this exists: individually-confident windows can still just be
+    wrong (a short ~1s window is small enough that a spurious match can
+    score just as high as a real one -- e.g. the real dialogue clip in
+    docs/RESEARCH.md section 1g produced windows individually scoring
+    3.5-5.5 confidence whose offsets *disagreed with each other* by up to
+    560ms). Requiring several *independent* windows -- different tracks,
+    different points in time -- to land on the same offset before trusting
+    it is a much stronger check than any single window's confidence
+    number, and is what actually distinguishes "one narrator, briefly
+    silent in some windows" (should cluster tightly) from "multiple
+    speakers, no single global offset any window can consistently see"
+    (won't cluster at all -- see the real dialogue-clip case).
+    """
+    best: list[SyncNetWindowResult] = []
+    for w in windows:
+        cluster = [x for x in windows if abs(x.offset_frames - w.offset_frames) <= tolerance_frames]
+        if len(cluster) > len(best):
+            best = cluster
+    return best
+
+
 def estimate_syncnet_offset(video_path: str, vshift: int = 15, frame_rate: float = 25.0,
-                             in_sync_threshold_ms: float = 40.0) -> SyncNetEstimate:
-    """Run SyncNet and aggregate across all detected face tracks into a
-    single estimate: median offset (robust to any one track disagreeing),
-    median confidence (conservative summary, not the best-case track)."""
-    tracks = estimate_syncnet_tracks(video_path, vshift=vshift)
+                             in_sync_threshold_ms: float = 40.0, window_s: float = 1.0,
+                             min_window_confidence: float = DEFAULT_SYNCNET_MIN_CONFIDENCE,
+                             cluster_tolerance_frames: int = 2,
+                             min_cluster_size: int = 3) -> SyncNetEstimate:
+    """Run SyncNet and aggregate into a single estimate.
+
+    Two aggregation paths, tried in order:
+
+    1. Windowed evidence, gated on cross-window agreement (see
+       `_windowed_offsets` + `_largest_agreeing_cluster`): pool every ~1s
+       window from every face track, keep the ones that individually
+       clear `min_window_confidence`, then require at least
+       `min_cluster_size` of *those* to independently agree with each
+       other (within `cluster_tolerance_frames`) before trusting them.
+       This is what makes multi-speaker dialogue tractable
+       (docs/RESEARCH.md sections 1f -> 1g): a track's non-speaking frames
+       no longer drag down a whole-track average, AND a single lucky/
+       spurious confident window can no longer look like a real answer on
+       its own -- it has to be corroborated.
+    2. Whole-track fallback (the original M3c behavior): used whenever no
+       cluster of agreeing confident windows is found -- either because no
+       window was individually confident, or (the new, real failure mode
+       this catches) confident windows exist but contradict each other.
+       Correctly conservative: on a single continuous narrator this
+       fallback is close to whichever windowed answer would've been found
+       anyway; on real multi-speaker dialogue it correctly stays at the
+       same low whole-track confidence M3c already reported before this
+       change, rather than being fooled into false confidence by windowing.
+    """
+    tracks = estimate_syncnet_tracks(video_path, vshift=vshift, window_s=window_s, frame_rate=frame_rate)
     if not tracks:
         raise ValueError("No face tracks found (no trackable face for >= min_track frames).")
 
-    import statistics
-    offset_frames = statistics.median(t.offset_frames for t in tracks)
-    confidence = statistics.median(t.confidence for t in tracks)
+    all_windows = [w for t in tracks for w in t.windows]
+    confident_windows = [w for w in all_windows if w.confidence >= min_window_confidence]
+    cluster = _largest_agreeing_cluster(confident_windows, tolerance_frames=cluster_tolerance_frames)
+
+    if len(cluster) >= min_cluster_size:
+        offset_frames = statistics.median(w.offset_frames for w in cluster)
+        confidence = statistics.median(w.confidence for w in cluster)
+        n_confident_windows = len(cluster)
+    else:
+        offset_frames = statistics.median(t.offset_frames for t in tracks)
+        confidence = statistics.median(t.confidence for t in tracks)
+        n_confident_windows = 0
+
     offset_ms = -offset_frames * (1000.0 / frame_rate)  # sign flip -- see module docstring
 
     if abs(offset_ms) <= in_sync_threshold_ms:
@@ -150,5 +282,5 @@ def estimate_syncnet_offset(video_path: str, vshift: int = 15, frame_rate: float
     else:
         direction = "audio_leads"
 
-    return SyncNetEstimate(offset_ms=offset_ms, confidence=confidence,
-                            direction=direction, n_tracks=len(tracks))
+    return SyncNetEstimate(offset_ms=offset_ms, confidence=confidence, direction=direction,
+                            n_tracks=len(tracks), n_confident_windows=n_confident_windows)
