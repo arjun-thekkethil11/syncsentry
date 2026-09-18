@@ -216,6 +216,53 @@ threshold for whatever comes after this (per-speaker attribution, per
 §1f's actual proposed fix, would slot in as "windows near a
 detected-speaking segment" rather than needing new infrastructure).
 
+## 1h. A real, fully-automated active-speaker gate -- built, validated, still not enough for this one short clip
+
+§1f's real fix was scoped as "attribute each moment to whoever's actually
+talking" -- a full active-speaker-detection (ASD) model (e.g. TalkNet-ASD)
+is the textbook way, but that's a fourth pretrained model to vendor. Tried
+a cheaper, fully-automated version first, reusing what's already built:
+SyncNet's own crop stage already produces a tight, face-centered 224x224
+track per face (module docstring), so no new face/landmark detection is
+needed -- just measure frame-to-frame pixel motion in the lower ~45% of
+each crop frame (the mouth/chin region) as a per-track, self-calibrating
+("above this track's own median") proxy for "is this specific person's
+mouth moving right now." Windows below a track's own median motion (very
+likely: listening, not talking) are excluded from SyncNet scoring entirely
+via `_windowed_offsets`'s `motion`/`motion_threshold` gate, in
+`syncnet_offset.py`.
+
+Important distinction from the already-falsified §1d heuristic: that one
+tried to use mouth motion *as the offset signal itself* (by how many ms is
+motion correlated with audio) and failed. This only asks "is the mouth
+moving at all" -- a much easier, more robust question -- purely to gate
+*which* SyncNet windows (whose actual offset signal was already
+independently validated, §1e) are worth trusting. Different job, and it
+holds up: still passes the full 0/200ms ground-truth regression (§1e) with
+the gate on.
+
+On §1f/1g's real video: the gate roughly halved the windows scored per
+track (14->5-6), concretely removing a lot of the noisiest, least-active
+segments -- real, measurable cleanup, not a no-op. But even after that,
+the remaining confident (>=3.0) windows still only formed two separate,
+mutually-contradicting 2-window pairs (~480-560ms vs ~240-320ms), neither
+reaching the >=3-window corroboration bar from §1g. Final answer:
+correctly unchanged (-320ms, confidence 0.53, still below threshold) --
+no regression, but no automated answer for this asset either.
+
+**Honest conclusion:** this specific clip (a ~30s teaser, cut into
+several camera angles, ending in a non-face card -- see §1f) is likely too
+short and too fragmented for *any* automated method, including a full ASD
+model, to gather enough independent corroborating evidence within it --
+each individual continuous "this person is speaking, on camera, same shot"
+segment is only a few seconds long. This is a property of the specific
+asset, not (only) a gap in the tooling: the fully-automated pipeline built
+across §1g/1h is real and validated, and would very plausibly succeed on a
+longer cut of the same source (more continuous per-speaker segments to
+corroborate against) without further changes -- untested, since only the
+short teaser was available, but the mechanism (more independent
+same-answer windows -> clears `min_cluster_size`) directly predicts it.
+
 ## 2. Lip-sync detection has moved to learned contrastive embeddings
 
 [SyncNet](http://arxiv.org/pdf/2005.08606v1) and successors --
