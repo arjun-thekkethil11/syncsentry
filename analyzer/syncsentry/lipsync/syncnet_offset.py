@@ -35,6 +35,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 _SYNCNET_DIR = Path(__file__).resolve().parent.parent.parent / "third_party" / "syncnet_python"
@@ -118,8 +119,53 @@ def _run_face_track_crop(video_path: str, data_dir: Path, reference: str) -> Non
         raise RuntimeError(f"SyncNet face-tracking stage failed:\n{proc.stderr[-4000:]}")
 
 
+def _mouth_motion_per_frame(crop_file: Path, n_frames: int) -> np.ndarray:
+    """Per-frame mouth-motion magnitude for a face-track crop, used as a
+    cheap, fully-automated active-speaker gate (docs/RESEARCH.md section
+    1h): a frame where this specific tracked face's mouth is barely moving
+    is almost certainly a frame where they're listening, not talking --
+    exactly the frames that dilute SyncNet's per-track/whole-track
+    aggregate on multi-speaker dialogue (sections 1f/1g). No new face/
+    landmark detection needed: SyncNet's own crop stage already produces a
+    tight, face-centered 224x224 track (module docstring), so the mouth is
+    reliably in the lower portion of every frame without re-detecting it.
+
+    Deliberately NOT reused as an offset estimator itself -- that's
+    `lipsync/mouth_offset.py`, already tried and falsified (section 1d).
+    This only asks "is the mouth moving at all right now", a much easier
+    and more robust question than "by how many ms is it offset from the
+    audio", which is exactly why it can do a job the falsified detector
+    couldn't: gate frames for SyncNet's own (independently validated,
+    section 1e) offset signal, not replace it.
+    """
+    cap = cv2.VideoCapture(str(crop_file))
+    frames = []
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        h = gray.shape[0]
+        frames.append(gray[int(h * 0.55):, :])  # lower ~45%: mouth/chin region of a face-centered crop
+    cap.release()
+
+    if len(frames) < 2:
+        return np.zeros(n_frames)
+
+    motion = [0.0] + [
+        float(np.mean(np.abs(frames[i].astype(np.float32) - frames[i - 1].astype(np.float32))))
+        for i in range(1, len(frames))
+    ]
+    motion = np.array(motion)
+    if len(motion) >= n_frames:
+        return motion[:n_frames]
+    return np.pad(motion, (0, n_frames - len(motion)), mode="edge")
+
+
 def _windowed_offsets(dist: np.ndarray, vshift: int, track_index: int,
-                       window_frames: int, step_frames: int) -> list[SyncNetWindowResult]:
+                       window_frames: int, step_frames: int,
+                       motion: np.ndarray | None = None,
+                       motion_threshold: float | None = None) -> list[SyncNetWindowResult]:
     """Slide a window over a track's per-frame x per-shift distance matrix
     (`dist`, shape [n_frames, 2*vshift+1] -- SyncNet's own raw output,
     already computed by `SyncNetInstance.evaluate()` but discarded by the
@@ -136,6 +182,15 @@ def _windowed_offsets(dist: np.ndarray, vshift: int, track_index: int,
         chunk = dist[start:start + window_frames]
         if len(chunk) < window_frames:
             continue
+        # Active-speaker gate (section 1h): skip windows where this track's
+        # mouth is relatively still -- almost certainly listening, not
+        # talking, in multi-speaker content. `motion_threshold` is
+        # track-relative (its own median), not a fixed pixel-difference
+        # value, so it self-calibrates to each track's resolution/lighting.
+        if motion is not None and motion_threshold is not None:
+            window_motion = float(np.mean(motion[start:start + window_frames]))
+            if window_motion < motion_threshold:
+                continue
         mean_dist_per_shift = chunk.mean(axis=0)
         minidx = int(np.argmin(mean_dist_per_shift))
         offset_frames = vshift - minidx
@@ -158,13 +213,19 @@ def _windowed_offsets(dist: np.ndarray, vshift: int, track_index: int,
     return windows
 
 
-def estimate_syncnet_tracks(video_path: str, vshift: int = 15,
-                             window_s: float = 1.0, frame_rate: float = 25.0) -> list[SyncNetTrackResult]:
+def estimate_syncnet_tracks(video_path: str, vshift: int = 15, window_s: float = 1.0,
+                             frame_rate: float = 25.0, gate_on_mouth_motion: bool = True) -> list[SyncNetTrackResult]:
     """Run the full 2-stage SyncNet pipeline and return one result per
     detected face track (see module docstring), each carrying both a
     whole-track aggregate and a set of short-window sub-scores (see
     `_windowed_offsets`) for callers that want to discount
-    listening-not-speaking frames rather than average over them."""
+    listening-not-speaking frames rather than average over them.
+
+    `gate_on_mouth_motion` (default True): also require above-median mouth
+    motion for a window to be scored at all (section 1h's active-speaker
+    gate) -- set False to get the pre-1h windowing behavior (section 1g)
+    for comparison/debugging.
+    """
     _check_available()
 
     sys.path.insert(0, str(_SYNCNET_DIR))
@@ -191,8 +252,15 @@ def estimate_syncnet_tracks(video_path: str, vshift: int = 15,
         results = []
         for track_index, crop_file in enumerate(crop_files):
             offset, conf, dist = s.evaluate(opt, videofile=str(crop_file))
-            windows = _windowed_offsets(dist, vshift, track_index,
-                                         window_frames=window_frames, step_frames=window_frames)
+
+            motion, motion_threshold = None, None
+            if gate_on_mouth_motion:
+                motion = _mouth_motion_per_frame(crop_file, n_frames=dist.shape[0])
+                motion_threshold = float(np.median(motion))
+
+            windows = _windowed_offsets(dist, vshift, track_index, window_frames=window_frames,
+                                         step_frames=window_frames, motion=motion,
+                                         motion_threshold=motion_threshold)
             results.append(SyncNetTrackResult(
                 offset_frames=int(offset), confidence=float(conf), n_frames=len(dist),
                 windows=windows,
@@ -230,7 +298,8 @@ def estimate_syncnet_offset(video_path: str, vshift: int = 15, frame_rate: float
                              in_sync_threshold_ms: float = 40.0, window_s: float = 1.0,
                              min_window_confidence: float = DEFAULT_SYNCNET_MIN_CONFIDENCE,
                              cluster_tolerance_frames: int = 2,
-                             min_cluster_size: int = 3) -> SyncNetEstimate:
+                             min_cluster_size: int = 3,
+                             gate_on_mouth_motion: bool = True) -> SyncNetEstimate:
     """Run SyncNet and aggregate into a single estimate.
 
     Two aggregation paths, tried in order:
@@ -256,7 +325,8 @@ def estimate_syncnet_offset(video_path: str, vshift: int = 15, frame_rate: float
        same low whole-track confidence M3c already reported before this
        change, rather than being fooled into false confidence by windowing.
     """
-    tracks = estimate_syncnet_tracks(video_path, vshift=vshift, window_s=window_s, frame_rate=frame_rate)
+    tracks = estimate_syncnet_tracks(video_path, vshift=vshift, window_s=window_s, frame_rate=frame_rate,
+                                      gate_on_mouth_motion=gate_on_mouth_motion)
     if not tracks:
         raise ValueError("No face tracks found (no trackable face for >= min_track frames).")
 

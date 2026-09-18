@@ -105,6 +105,22 @@ implemented and tested, not aspirational scope.
       3; re-validated both the §1e ground-truth regression (still passes)
       and the hard video (now correctly falls back to the same honest
       low confidence as before, no regression). See `docs/RESEARCH.md` §1g.
+- [x] **M3c.7 -- Fully-automated active-speaker gate (mouth motion), no manual step.**
+      Real user ask: no manual offset entry, fully automated. Built a
+      cheap active-speaker approximation reusing SyncNet's own
+      face-centered crops (no new model): per-track, self-calibrating
+      mouth-motion gate excludes windows where that face is likely
+      listening, not talking, before SyncNet scores them at all. Passes
+      the full ground-truth regression with the gate on (no regression).
+      On the §M3c.5/6 video: measurably cleaned up the windows scored
+      (14->5-6 per track) but the remaining confident windows still only
+      formed two separate, contradicting 2-window pairs -- correctly still
+      below the corroboration bar, so the honest answer stays "can't
+      reliably tell" for this specific ~30s, multi-camera-cut teaser.
+      Assessed as a property of this particular short/fragmented asset,
+      not (only) a tooling gap -- see `docs/RESEARCH.md` §1h for why a
+      longer cut of the same source would very plausibly work with zero
+      further changes.
 - [x] **M4 -- Go orchestrator: catalog batch runner.** Job queue + asset
       state in Postgres (`SELECT ... FOR UPDATE SKIP LOCKED` for safe
       concurrent claiming), `POST /jobs` / `GET /jobs` / `GET /jobs/{id}`,
