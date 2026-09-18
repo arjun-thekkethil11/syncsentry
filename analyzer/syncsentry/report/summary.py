@@ -20,6 +20,19 @@ class IssueSummary:
     fixed: bool
     residual_offset_ms: float | None
     note: str = ""
+    # Structured detector metadata, mainly for the webapp's visual gauges
+    # (docs/RESEARCH.md has the full detail; `note` stays the human-
+    # readable prose version of the same numbers for CLI/report.txt).
+    # "A/V sync": confidence/min_confidence come from the coarse or SyncNet
+    # detector; method is "coarse" | "syncnet".
+    # "Captions": confidence is matched_count / (matched_count +
+    # unmatched_count) -- the fraction of cues that had a nearby speech
+    # onset to compare against, not a model score; method is None.
+    confidence: float | None = None
+    min_confidence: float | None = None
+    method: str | None = None
+    matched_count: int | None = None
+    unmatched_count: int | None = None
 
 
 @dataclass
@@ -88,6 +101,11 @@ class SyncFixSummary:
                     "fixed": i.fixed,
                     "residual_offset_ms": i.residual_offset_ms,
                     "note": i.note,
+                    "confidence": i.confidence,
+                    "min_confidence": i.min_confidence,
+                    "method": i.method,
+                    "matched_count": i.matched_count,
+                    "unmatched_count": i.unmatched_count,
                 }
                 for i in self.issues
             ],

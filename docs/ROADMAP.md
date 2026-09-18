@@ -134,8 +134,27 @@ implemented and tested, not aspirational scope.
       (unit tests with an in-memory Store + `httptest` fake analyzer API;
       one real-Postgres integration test, opt-in via
       `SYNCSENTRY_TEST_DATABASE_URL`, skipped otherwise).
+- [x] **M4.5 -- Webapp: browser UI for detect + fix + visualize (single asset).**
+      A React/Vite/Tailwind SPA (`webapp/`) in front of the same `/v1/fix`
+      the CLI and Go orchestrator already call -- no parallel pipeline.
+      Upload a video (or a `.zip` bundling video + captions -- new
+      `api.py` extraction path, `_extract_zip_inputs`) and optional
+      captions, get back detected/residual offset bars, a confidence
+      gauge (plotted against the actual threshold used, not just the raw
+      number), and download links for the corrected files. Required two
+      small, real backend additions, not just a frontend: (1) CORS
+      middleware, since this is now a cross-origin browser client; (2)
+      `IssueSummary` gained structured `confidence`/`min_confidence`/
+      `method`/`matched_count`/`unmatched_count` fields -- previously that
+      detail only existed embedded in a prose `note` string, fine for a
+      CLI report, not for a UI gauge. Verified against the real API (not
+      mocked): screenshotted the actual results page after uploading a
+      real synthetic fixture with a known +175ms/-95ms injected offset and
+      confirming the rendered numbers match. 62 Python tests still pass
+      (+4 new: zip upload, zip-without-video rejection).
 - [ ] **M5 -- Sync-health dashboard.** Per-title timeline visualization;
-      catalog-wide drift summary.
+      catalog-wide drift summary (across jobs recorded by the M4
+      orchestrator, surfaced in the M4.5 webapp).
 - [ ] **M6 -- Real-content validation + writeup.** Validate against a
       small set of Creative-Commons titles (kept out of git); publish a
       benchmark comparison write-up.

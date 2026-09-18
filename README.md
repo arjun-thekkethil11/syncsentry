@@ -117,6 +117,26 @@ detection + real VAD, independently validated) is the trustworthy half of
 that finding; `syncsentry fix --use-syncnet` is the fix (a real pretrained
 estimator, see above), just not yet plumbed into `classify-drift` itself.
 
+## Webapp
+
+A browser UI (`webapp/`, React + Vite + Tailwind) in front of the same
+`/v1/fix` the CLI and orchestrator use -- upload a video (or a `.zip`
+bundling video + captions), optionally toggle SyncNet, and see detected/
+residual offset bars, a confidence gauge, and download links for the
+corrected files.
+
+```bash
+# 1. the analyzer API (from analyzer/, .venv active)
+uvicorn syncsentry.api:app --port 8000
+
+# 2. the webapp
+cd webapp && npm install && npm run dev
+# -> http://localhost:5173
+```
+
+Point it at a non-localhost API with `VITE_API_BASE_URL` (e.g. in
+`webapp/.env.local`) before `npm run build`.
+
 ## Catalog batch runner (Go orchestrator)
 
 For processing many assets rather than one at a time: a Postgres-backed
@@ -186,7 +206,7 @@ syncsentry fix --video fixtures/real_content/dialogue_clip.mkv --out-dir out/ --
 
 Python 3.11 (NumPy/SciPy/OpenCV for signal + face detection) · Silero VAD ·
 pretrained SyncNet + S3FD (opt-in, `--use-syncnet`) · PyTorch (Apple Silicon
-MPS) · Go (orchestrator) · FFmpeg.
+MPS) · Go (orchestrator) · React/Vite/Tailwind (webapp) · FFmpeg.
 
 ## Repo layout
 
@@ -212,6 +232,7 @@ services/orchestrator/  Go catalog batch runner (M4)
   internal/pyclient/   HTTP client calling the analyzer's /v1/fix
   internal/worker/      Poll loop: claim job -> call pyclient -> record result
   docker-compose.yml    Postgres for local dev
+webapp/              Browser UI (React/Vite/Tailwind), calls the analyzer API directly (M4.5)
 docs/RESEARCH.md     Literature -> design-decision mapping
 docs/ROADMAP.md      Milestone status
 ```
