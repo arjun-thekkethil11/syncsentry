@@ -19,10 +19,13 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+import time
 import uuid
+import zipfile
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 
 from syncsentry import __version__
@@ -30,12 +33,56 @@ from syncsentry.lipsync.dialogue_scenes import detect_dialogue_scenes
 from syncsentry.lipsync.scene_offsets import estimate_windowed_offsets
 from syncsentry.lipsync.title_drift import classify_title_drift
 from syncsentry.pipeline import run_fix_pipeline
+from syncsentry.util.ffmpeg_io import probe_duration_s
 
 app = FastAPI(
     title="SyncSentry",
     description="Detects and corrects A/V offset and caption drift in OTT video assets.",
     version=__version__,
 )
+
+# The webapp (webapp/, a separate Vite dev server / static build) calls this
+# API directly from the browser -- wide open here because this is a local
+# dev tool, not a multi-tenant service; tighten `allow_origins` before
+# deploying anywhere real.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+_VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".ts"}
+_CAPTION_EXTS = {".vtt", ".srt"}
+
+
+def _extract_zip_inputs(zip_path: Path, dest_dir: Path) -> tuple[Path, Path | None]:
+    """Unpack an uploaded .zip and find the video (+ optional captions)
+    inside -- lets the webapp offer "upload a zip" as one convenience path
+    without duplicating multipart-handling for every possible bundling
+    scheme. Picks the first file matching each extension set found (by
+    name, so results are deterministic), rather than assuming a fixed
+    filename/layout -- most real "here's my clip + captions" zips aren't
+    structured any particular way.
+    """
+    with zipfile.ZipFile(zip_path) as zf:
+        zf.extractall(dest_dir)
+
+    video_path, captions_path = None, None
+    for path in sorted(dest_dir.rglob("*")):
+        if not path.is_file():
+            continue
+        suffix = path.suffix.lower()
+        if video_path is None and suffix in _VIDEO_EXTS:
+            video_path = path
+        elif captions_path is None and suffix in _CAPTION_EXTS:
+            captions_path = path
+    if video_path is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"No video file found in the uploaded zip (looked for {sorted(_VIDEO_EXTS)}).",
+        )
+    return video_path, captions_path
 
 # Jobs are written under a run directory so corrected files can be fetched
 # afterward via /v1/jobs/{job_id}/files/{name}. In-memory job registry is
@@ -57,6 +104,11 @@ async def fix(video: UploadFile = File(...), captions: UploadFile | None = File(
     """Upload a video (and optionally its captions), get back a short report
     plus download links for the corrected files.
 
+    `video` may also be a single `.zip` containing the video (and
+    optionally a `.vtt`/`.srt` captions file inside it) -- a convenience
+    for the webapp's "upload a zip" path so callers don't need to bundle
+    two separate multipart fields.
+
     `use_syncnet` (default False): use the pretrained SyncNet model (M3c,
     docs/RESEARCH.md section 1e) instead of the fast coarse detector. Far
     more accurate on real talking-head content, but this request will then
@@ -76,28 +128,47 @@ async def fix(video: UploadFile = File(...), captions: UploadFile | None = File(
     job_dir = _RUNS_DIR / job_id
     job_dir.mkdir(parents=True)
 
-    video_path = job_dir / video.filename
-    with video_path.open("wb") as f:
+    upload_path = job_dir / "upload" / video.filename
+    upload_path.parent.mkdir(parents=True, exist_ok=True)
+    with upload_path.open("wb") as f:
         shutil.copyfileobj(video.file, f)
 
-    captions_path = None
+    # Convenience path for the webapp: a single .zip containing the video
+    # (and optionally captions) instead of two separate multipart fields.
+    if upload_path.suffix.lower() == ".zip":
+        video_path, zip_captions_path = _extract_zip_inputs(upload_path, job_dir / "upload_extracted")
+    else:
+        video_path, zip_captions_path = upload_path, None
+
+    captions_path = zip_captions_path
     if captions is not None:
-        captions_path = job_dir / captions.filename
+        captions_path = job_dir / "upload" / captions.filename
         with captions_path.open("wb") as f:
             shutil.copyfileobj(captions.file, f)
 
+    try:
+        input_duration_s = probe_duration_s(str(video_path))
+    except Exception:  # noqa: BLE001 -- purely informational, never block processing on it
+        input_duration_s = None
+
+    started_at = time.monotonic()
     try:
         summary = run_fix_pipeline(video_path, job_dir / "out", captions_path=captions_path,
                                     av_min_confidence=av_min_confidence, use_syncnet=use_syncnet,
                                     syncnet_min_confidence=syncnet_min_confidence)
     except Exception as exc:  # noqa: BLE001 -- surface the real error to the caller
         raise HTTPException(status_code=422, detail=f"Processing failed: {exc}") from exc
+    processing_time_s = time.monotonic() - started_at
 
     result = summary.to_dict()
     # Don't leak server-side absolute paths to API callers -- only the
     # filename (via download_urls) is a caller's business.
     result.pop("output_files", None)
     result["job_id"] = job_id
+    result["input_filename"] = video_path.name
+    result["input_duration_s"] = input_duration_s
+    result["processing_time_s"] = round(processing_time_s, 2)
+    result["used_syncnet"] = use_syncnet
     result["download_urls"] = {
         label: f"/v1/jobs/{job_id}/files/{Path(path).name}"
         for label, path in summary.output_files.items()

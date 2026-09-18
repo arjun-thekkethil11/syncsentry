@@ -126,12 +126,14 @@ def run_fix_pipeline(video_path: str | Path, out_dir: str | Path,
         summary.issues.append(IssueSummary(
             name="A/V sync", had_issue=False, detected_offset_ms=det.offset_ms,
             fixed=False, residual_offset_ms=None, note=note,
+            confidence=det.confidence, min_confidence=det.min_confidence, method=det.method,
         ))
     elif det.direction == "in_sync":
         corrected_video_path.write_bytes(video_path.read_bytes())
         summary.issues.append(IssueSummary(
             name="A/V sync", had_issue=False, detected_offset_ms=det.offset_ms,
             fixed=False, residual_offset_ms=None, note=det.fallback_note,
+            confidence=det.confidence, min_confidence=det.min_confidence, method=det.method,
         ))
     else:
         fix_av_offset(video_path, corrected_video_path, det.offset_ms)
@@ -142,6 +144,7 @@ def run_fix_pipeline(video_path: str | Path, out_dir: str | Path,
             fixed=(residual_det.confidence >= residual_det.min_confidence
                    and abs(residual_det.offset_ms) <= av_threshold_ms),
             residual_offset_ms=residual_det.offset_ms, note=det.fallback_note,
+            confidence=det.confidence, min_confidence=det.min_confidence, method=det.method,
         ))
 
     summary.output_files["corrected_video"] = str(corrected_video_path)
@@ -152,18 +155,24 @@ def run_fix_pipeline(video_path: str | Path, out_dir: str | Path,
         cap_report = check_caption_drift(str(corrected_video_path), str(captions_path))
         corrected_captions_path = out_dir / f"{captions_path.stem}.corrected{captions_path.suffix}"
 
+        cap_matched, cap_unmatched = cap_report.matched_count, cap_report.unmatched_count
+        cap_total = cap_matched + cap_unmatched
+        cap_confidence = (cap_matched / cap_total) if cap_total > 0 else None
+
         if cap_report.median_offset_ms is None:
             note = "no matching speech onsets found"
             corrected_captions_path.write_text(captions_path.read_text(encoding="utf-8"), encoding="utf-8")
             summary.issues.append(IssueSummary(
                 name="Captions", had_issue=False, detected_offset_ms=None,
                 fixed=False, residual_offset_ms=None, note=note,
+                confidence=cap_confidence, matched_count=cap_matched, unmatched_count=cap_unmatched,
             ))
         elif abs(cap_report.median_offset_ms) < caption_threshold_ms:
             corrected_captions_path.write_text(captions_path.read_text(encoding="utf-8"), encoding="utf-8")
             summary.issues.append(IssueSummary(
                 name="Captions", had_issue=False, detected_offset_ms=cap_report.median_offset_ms,
                 fixed=False, residual_offset_ms=None,
+                confidence=cap_confidence, matched_count=cap_matched, unmatched_count=cap_unmatched,
             ))
         else:
             fix_caption_offset(captions_path, corrected_captions_path, cap_report.median_offset_ms)
@@ -173,6 +182,7 @@ def run_fix_pipeline(video_path: str | Path, out_dir: str | Path,
                 name="Captions", had_issue=True, detected_offset_ms=cap_report.median_offset_ms,
                 fixed=(residual_ms is not None and abs(residual_ms) <= caption_threshold_ms),
                 residual_offset_ms=residual_ms,
+                confidence=cap_confidence, matched_count=cap_matched, unmatched_count=cap_unmatched,
             ))
 
         summary.output_files["corrected_captions"] = str(corrected_captions_path)

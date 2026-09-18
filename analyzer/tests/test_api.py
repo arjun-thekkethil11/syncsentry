@@ -3,6 +3,8 @@ HTTP, get back a report + download links, and verify the corrected file
 served back is actually fixed (round-trips through the real HTTP layer,
 not just the Python pipeline function directly).
 """
+import zipfile
+
 from fastapi.testclient import TestClient
 
 from syncsentry.api import app
@@ -108,3 +110,43 @@ def test_fix_endpoint_video_only(tmp_path):
     body = resp.json()
     assert len(body["issues"]) == 1
     assert "corrected_captions" not in body["download_urls"]
+
+
+def test_fix_endpoint_accepts_zip_bundle(tmp_path):
+    """The webapp's "upload a zip" convenience path: a single .zip holding
+    the video + captions instead of two multipart fields."""
+    spec = FixtureSpec(duration_s=8.0, period_s=2.0, pulse_ms=80, offset_ms=160.0)
+    video = generate_fixture(tmp_path / "broken.mkv", spec)
+    captions = generate_captions(tmp_path / "broken.vtt", spec, caption_offset_ms=0.0)
+
+    zip_path = tmp_path / "bundle.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.write(video, arcname="broken.mkv")
+        zf.write(captions, arcname="broken.vtt")
+
+    with zip_path.open("rb") as zf:
+        resp = client.post(
+            "/v1/fix",
+            files={"video": ("bundle.zip", zf, "application/zip")},
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["input_filename"] == "broken.mkv"
+    assert body["input_duration_s"] is not None
+    assert "processing_time_s" in body
+    av_issue = next(i for i in body["issues"] if i["name"] == "A/V sync")
+    assert av_issue["had_issue"] is True
+
+
+def test_fix_endpoint_zip_without_video_rejected(tmp_path):
+    zip_path = tmp_path / "empty.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("readme.txt", "no video in here")
+
+    with zip_path.open("rb") as zf:
+        resp = client.post(
+            "/v1/fix",
+            files={"video": ("empty.zip", zf, "application/zip")},
+        )
+    assert resp.status_code == 422

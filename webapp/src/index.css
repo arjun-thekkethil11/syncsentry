@@ -1,0 +1,45 @@
+@import "tailwindcss";
+
+@theme {
+  --color-brand-50: #eef4ff;
+  --color-brand-100: #d9e6ff;
+  --color-brand-200: #b8d0ff;
+  --color-brand-300: #8bb0ff;
+  --color-brand-400: #5c8bff;
+  --color-brand-500: #3866f0;
+  --color-brand-600: #2748d1;
+  --color-brand-700: #2038a8;
+  --color-brand-800: #1c2f84;
+  --color-brand-900: #1a2c6b;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background-color: #0a0e1a;
+  color: #e7ebf7;
+  font-feature-settings: "tnum" 1;
+}
+
+::selection {
+  background-color: rgba(56, 102, 240, 0.35);
+}
+
+/* Small, tasteful custom scrollbar -- default browser scrollbars look out
+   of place against the dark, glassy panels used throughout the app. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #2a3352;
+  border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #384270;
+}
