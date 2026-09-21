@@ -1,6 +1,6 @@
-"""End-to-end tests for `syncsentry.pipeline.run_fix_pipeline` -- the thing
-an actual user runs: give it a broken asset, get back corrected files and a
-short report confirming both issues were resolved.
+"""End-to-end tests for `syncsentry.pipeline.run_fix_pipeline`: give it a
+broken asset, get back corrected files and a short report confirming both
+issues were resolved.
 """
 from pathlib import Path
 
@@ -59,7 +59,7 @@ def test_pipeline_respects_custom_av_threshold(tmp_path):
     # Regression test: run_fix_pipeline accepted an `av_threshold_ms` param
     # but never actually passed it to the detector, so a custom threshold
     # was silently ignored (the CLI's --av-threshold-ms flag was a no-op).
-    # A 60ms offset is above the *default* 40ms threshold but below this
+    # A 60ms offset is above the default 40ms threshold but below this
     # custom 100ms one, so it must be reported as "no issue" here.
     spec = FixtureSpec(duration_s=8.0, period_s=2.0, pulse_ms=80, offset_ms=60.0)
     video = generate_fixture(tmp_path / "borderline.mkv", spec)
@@ -71,27 +71,93 @@ def test_pipeline_respects_custom_av_threshold(tmp_path):
 
 
 @pytest.mark.skipif(not REAL_CLIP.exists(),
-                     reason="real-content fixture not fetched -- run analyzer/scripts/fetch_real_content.sh")
+                     reason="real-content fixture not fetched, run analyzer/scripts/fetch_real_content.sh")
 def test_pipeline_does_not_confidently_fix_low_confidence_real_content(tmp_path):
-    # Regression test for a real bug report: on real talking-head content
-    # (this clip's audio/video are genuinely in sync), the Tier-1 detector
-    # produces a low/negative-confidence, spuriously "detected" offset (see
-    # docs/RESEARCH.md section 1b). Before the confidence gate, the pipeline
-    # would apply a real audio shift based on that noise and could report a
-    # residual identical to (or as spurious as) the original "detected"
-    # value while still labeling it FIXED -- misleading and, worse, capable
-    # of quietly degrading an asset that was never actually broken.
+    # Regression test: on real talking-head content (this clip's
+    # audio/video are genuinely in sync), the Tier-1 detector produces a
+    # low/negative-confidence, spuriously "detected" offset. Without a
+    # confidence gate, the pipeline would apply a real audio shift based on
+    # that noise and could report a residual identical to (or as spurious
+    # as) the original "detected" value while still labeling it FIXED,
+    # which is misleading and, worse, capable of quietly degrading an
+    # asset that was never actually broken.
     summary = run_fix_pipeline(REAL_CLIP, tmp_path / "out")
 
     av_issue = next(i for i in summary.issues if i.name == "A/V sync")
     assert av_issue.had_issue is False
     assert av_issue.fixed is False
     assert "low-confidence" in av_issue.note
+    assert av_issue.status == "undetermined"
+    assert not summary.all_resolved  # undetermined must never report as resolved
 
     # The "corrected" video must be a byte-for-byte passthrough of the
-    # original -- we must not silently apply an audio shift we can't verify.
+    # original: an audio shift must never be applied silently if it can't
+    # be verified.
     corrected = Path(summary.output_files["corrected_video"])
     assert corrected.read_bytes() == REAL_CLIP.read_bytes()
+
+
+@pytest.mark.skipif(not REAL_CLIP.exists(),
+                     reason="real-content fixture not fetched, run analyzer/scripts/fetch_real_content.sh")
+def test_pipeline_large_offset_fix_verifies_correctly_not_spuriously_rejected(tmp_path):
+    # Regression test: `run_fix_pipeline`'s post-correction residual
+    # re-check used to call `_detect_av_offset` with its default
+    # `recenter_large_offsets=True`, i.e. the same wide-range-seed-capable
+    # detector used for the original detection. `fix_av_offset`'s
+    # trim-based correction (see `fixer/av_fix.py`) leaves the corrected
+    # file's audio track shorter than its video track by exactly the
+    # corrected amount (there's no more real source audio to fill that
+    # gap), a shape that never occurs on an original, uncorrected asset.
+    # The wide-range mouth-motion detector was only ever validated against
+    # original assets and produces a spurious large seed on this novel
+    # shape, which fed back into SyncNet and produced a confusing,
+    # unrelated residual (e.g. -2240ms after a correctly-applied +1640ms
+    # correction). `fixed` was correctly left `False` (that residual's own
+    # confidence was also low), but the reported number looked like the
+    # fix made things worse when it hadn't.
+    #
+    # Fix: the residual check now explicitly passes
+    # `recenter_large_offsets=False`, since a genuinely successful
+    # correction's residual should be small, well inside SyncNet's native
+    # +-600ms range, so recentering shouldn't be needed for a real
+    # verification pass at all. This test injects a real large (1200ms)
+    # offset on real content and asserts the pipeline both detects and
+    # verifies it correctly end to end, not just that detection alone
+    # works (that's already covered by test_syncnet_offset_real.py and
+    # test_wide_range_offset_real.py).
+    from syncsentry.fixer.av_fix import fix_av_offset
+    broken = tmp_path / "broken_large_offset.mkv"
+    fix_av_offset(REAL_CLIP, broken, offset_ms=-1200.0)  # injects true offset = +1200ms
+
+    summary = run_fix_pipeline(broken, tmp_path / "out", av_min_confidence=0.3,
+                                use_syncnet=True, syncnet_min_confidence=3.0)
+
+    av_issue = next(i for i in summary.issues if i.name == "A/V sync")
+    assert av_issue.had_issue is True
+    assert av_issue.fixed is True, (
+        f"expected the correction to verify successfully, got residual="
+        f"{av_issue.residual_offset_ms} confidence={av_issue.residual_confidence} note={av_issue.note!r}"
+    )
+    assert abs(av_issue.residual_offset_ms) <= 40.0
+    # The residual's own confidence must now always be reported alongside
+    # the number (previously always None/absent for this field).
+    assert av_issue.residual_confidence is not None
+    assert av_issue.residual_confidence >= 3.0
+
+
+def test_issue_summary_status_has_no_default_and_must_be_set_explicitly():
+    # Regression test: `IssueSummary.status` exists specifically to stop a
+    # false "in sync" claim from silently passing as resolved. It used to
+    # default to "in_sync", the single most dangerous value, so any future
+    # call site that forgot to pass `status=` would silently report the
+    # best possible outcome instead of failing loudly. Proves the fail-safe
+    # is now enforced at construction time: omitting `status` must raise
+    # TypeError, not silently default to "in_sync".
+    from syncsentry.report.summary import IssueSummary
+
+    with pytest.raises(TypeError):
+        IssueSummary(name="A/V sync", had_issue=False, detected_offset_ms=None,
+                     fixed=False, residual_offset_ms=None)
 
 
 def test_report_text_handles_no_issue_with_note_without_crashing():
@@ -104,11 +170,101 @@ def test_report_text_handles_no_issue_with_note_without_crashing():
 
     summary = SyncFixSummary(asset_name="test.mkv", issues=[
         IssueSummary(name="A/V sync", had_issue=False, detected_offset_ms=45.0,
-                     fixed=False, residual_offset_ms=None, note="low-confidence detection (0.12)"),
+                     fixed=False, residual_offset_ms=None, note="low-confidence detection (0.12)",
+                     status="undetermined"),
         IssueSummary(name="Captions", had_issue=False, detected_offset_ms=None,
-                     fixed=False, residual_offset_ms=None, note="no matching speech onsets found"),
+                     fixed=False, residual_offset_ms=None, note="no matching speech onsets found",
+                     status="undetermined"),
     ])
 
     text = summary.to_text()  # must not raise
     assert "low-confidence detection (0.12)" in text
     assert "no matching speech onsets found" in text
+    assert "UNDETERMINED" in text
+    # An undetermined result must never be silently counted as resolved.
+    assert not summary.all_resolved
+
+
+def test_pipeline_uses_piecewise_result_when_available(tmp_path, monkeypatch):
+    """Wiring test: when `_maybe_fix_piecewise` finds genuine piecewise
+    structure, its result must be used instead of the normal
+    single-global-offset path, and the normal path's own (expensive)
+    detector must not even run. Uses a synthetic clean fixture plus a
+    monkeypatched `_maybe_fix_piecewise` so this stays fast and
+    deterministic rather than depending on real face content actually
+    triggering the piecewise path (see `test_piecewise_offset_real.py` for
+    that, slower, real-content coverage). This test is purely about the
+    pipeline wiring being correct, not about the detector's own accuracy.
+    """
+    import syncsentry.pipeline as pipeline_mod
+
+    spec = FixtureSpec(duration_s=8.0, period_s=2.0, pulse_ms=80, offset_ms=0.0)
+    video = generate_fixture(tmp_path / "clean.mkv", spec)
+
+    canned = pipeline_mod.IssueSummary(
+        name="A/V sync", had_issue=True, detected_offset_ms=None, fixed=True,
+        residual_offset_ms=None, note="canned piecewise result", status="fixed",
+        method="piecewise", segments=[{"start_s": 0.0, "end_s": 4.0, "offset_ms": 300.0, "status": "trusted"},
+                                        {"start_s": 4.0, "end_s": 8.0, "offset_ms": -500.0, "status": "trusted"}],
+    )
+
+    def fake_maybe_fix_piecewise(video_path, corrected_video_path, av_threshold_ms, syncnet_min_confidence):
+        Path(corrected_video_path).write_bytes(Path(video_path).read_bytes())
+        return canned
+
+    single_global_called = []
+
+    def fake_single_global(*args, **kwargs):
+        single_global_called.append(True)
+        raise AssertionError("single-global path must not run when the piecewise path already produced a result")
+
+    monkeypatch.setattr(pipeline_mod, "_maybe_fix_piecewise", fake_maybe_fix_piecewise)
+    monkeypatch.setattr(pipeline_mod, "_fix_single_global_offset", fake_single_global)
+
+    summary = run_fix_pipeline(video, tmp_path / "out", use_syncnet=True)
+
+    assert not single_global_called
+    av_issue = next(i for i in summary.issues if i.name == "A/V sync")
+    assert av_issue.method == "piecewise"
+    assert av_issue.status == "fixed"
+    assert av_issue.segments == canned.segments
+    assert (tmp_path / "out" / "report.json").exists()
+    assert "piecewise" in (tmp_path / "out" / "report.txt").read_text()
+
+
+def test_undetermined_duration_fraction_computes_correctly():
+    from syncsentry.lipsync.piecewise_offset import OffsetSegment
+    from syncsentry.pipeline import _undetermined_duration_fraction
+
+    segs = [
+        OffsetSegment(0.0, 6.0, -0.0, 5.0, "trusted"),      # 6s trusted
+        OffsetSegment(6.0, 12.0, None, None, "undetermined"),  # 6s undetermined
+        OffsetSegment(12.0, 18.0, 320.0, 6.0, "trusted"),   # 6s trusted
+        OffsetSegment(18.0, 72.0, None, None, "undetermined"),  # 54s undetermined
+    ]
+    # 60/72 undetermined
+    assert _undetermined_duration_fraction(segs) == pytest.approx(60.0 / 72.0)
+
+
+def test_undetermined_duration_fraction_empty_is_zero():
+    from syncsentry.pipeline import _undetermined_duration_fraction
+    assert _undetermined_duration_fraction([]) == 0.0
+
+
+def test_pipeline_falls_through_to_single_global_when_not_piecewise(tmp_path, monkeypatch):
+    """The complementary case: when `_maybe_fix_piecewise` returns `None`
+    (the common case for genuinely single-source content), the normal
+    single-global-offset path must still run exactly as before, proving
+    this pre-check doesn't silently swallow the normal case."""
+    import syncsentry.pipeline as pipeline_mod
+
+    spec = FixtureSpec(duration_s=8.0, period_s=2.0, pulse_ms=80, offset_ms=0.0)
+    video = generate_fixture(tmp_path / "clean.mkv", spec)
+
+    monkeypatch.setattr(pipeline_mod, "_maybe_fix_piecewise", lambda *a, **k: None)
+
+    summary = run_fix_pipeline(video, tmp_path / "out", use_syncnet=False)
+
+    av_issue = next(i for i in summary.issues if i.name == "A/V sync")
+    assert av_issue.method != "piecewise"
+    assert av_issue.segments is None

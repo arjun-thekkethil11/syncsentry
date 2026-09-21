@@ -5,11 +5,8 @@ interface OffsetBarProps {
   scaleMs?: number;
 }
 
-/** A horizontal "how far from perfectly in sync" bar, centered at 0ms.
- * Deliberately not a generic chart-library gauge: the one thing every user
- * of this tool actually wants to see at a glance is "which way, and how
- * far" -- a signed bar centered on zero communicates that in a way a
- * plain number doesn't. */
+/** A horizontal offset bar, centered at 0ms, showing direction and
+ * magnitude at a glance. */
 export function OffsetBar({ label, offsetMs, scaleMs = 500 }: OffsetBarProps) {
   const clamped = offsetMs === null ? 0 : Math.max(-scaleMs, Math.min(scaleMs, offsetMs));
   const pct = (clamped / scaleMs) * 50; // -50..50, relative to center

@@ -43,9 +43,8 @@ export function Analyze() {
       <div className="mb-8">
         <h1 className="text-2xl font-bold text-slate-100 mb-2">Analyze a video</h1>
         <p className="text-slate-400 text-sm leading-relaxed">
-          Upload a video (or a .zip with the video + captions inside). SyncSentry detects any
-          A/V or caption sync offset, fixes it, and shows you exactly what it found — before and
-          after.
+          Upload a video, or a .zip with the video and captions inside. SyncSentry detects any
+          A/V or caption sync offset, fixes it, and shows you what it found before and after.
         </p>
       </div>
 

@@ -1,12 +1,10 @@
-"""Tests for the M3a statistical drift-classification layer: windowed
-per-scene offset estimation + RANSAC title-level pattern classification.
+"""Tests for the statistical drift-classification layer: windowed
+per-scene offset estimation plus RANSAC title-level pattern classification.
 
-Methodology matches the rest of this project: inject a known, named drift
-pattern via `generate_piecewise_offset_fixture`, run the real pipeline
-(windowed estimation -> classification), and assert the classifier recovers
-the pattern -- this is the DiVAS-style evaluation (constant / drift-early /
-drift-late / intermittent), just against synthetic ground truth instead of
-a real dataset.
+Inject a known, named drift pattern via `generate_piecewise_offset_fixture`,
+run the real pipeline (windowed estimation, then classification), and
+assert the classifier recovers the pattern (constant / drift-early /
+drift-late / intermittent) against synthetic ground truth.
 """
 import pytest
 

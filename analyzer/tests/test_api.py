@@ -54,8 +54,8 @@ def test_fix_endpoint_end_to_end(tmp_path):
     download_resp = client.get(video_url)
     assert download_resp.status_code == 200
 
-    # Save the downloaded bytes and prove *they* are actually fixed too --
-    # not just trusting the report.
+    # Save the downloaded bytes and prove they are actually fixed too,
+    # rather than just trusting the report.
     out_path = tmp_path / "downloaded.mkv"
     out_path.write_bytes(download_resp.content)
     estimate = estimate_av_offset(str(out_path))
@@ -81,10 +81,9 @@ def test_classify_drift_endpoint(tmp_path):
 
 def test_dialogue_scenes_endpoint_finds_none_in_synthetic_fixture(tmp_path):
     # The synthetic flash+beep fixture has no real face and no real speech,
-    # so the real face-detector + VAD-backed endpoint should correctly find
-    # zero dialogue scenes -- a real negative result, not a mocked one. See
-    # tests/test_dialogue_scenes_real.py for the positive-case validation
-    # against genuine human faces/speech (skipped in CI by design).
+    # so the real face-detector + VAD-backed endpoint should correctly
+    # report zero dialogue scenes. See test_dialogue_scenes_real.py for
+    # the positive-case validation against genuine faces/speech.
     spec = FixtureSpec(duration_s=6.0, period_s=1.0, pulse_ms=80)
     video = generate_fixture(tmp_path / "no_dialogue.mkv", spec)
 

@@ -1,20 +1,20 @@
 """Caption/subtitle timing drift checker.
 
-Production caption pipelines (including the vertical-caption-sync tooling
-this project's author built at Fox) typically validate captions against
-*picture* cut points or frame PTS. That is necessary but not sufficient:
-what actually matters perceptually is whether caption cues line up with
-*speech*, independent of any separate picture/audio sync issue. A caption
+Production caption pipelines typically validate captions against picture
+cut points or frame PTS. That is necessary but not sufficient: what
+actually matters perceptually is whether caption cues line up with
+speech, independent of any separate picture/audio sync issue. A caption
 track can be perfectly aligned to frame PTS and still be wrong if it was
 authored against a different audio mix, a different frame rate, or a
 stale EDL.
 
 This module detects speech-like onsets directly from the audio track
-(via the same RMS-envelope machinery as the coarse A/V detector, generalized
-to peak-picking rather than whole-signal cross-correlation) and compares
-them against WebVTT cue start times, independent of the video track
-entirely. This isolates "caption vs. speech" drift from "picture vs. audio"
-drift -- the two failure modes production QC needs to tell apart.
+(via the same RMS-envelope machinery as the coarse A/V detector,
+generalized to peak-picking rather than whole-signal cross-correlation)
+and compares them against WebVTT cue start times, independent of the
+video track entirely. This isolates "caption vs. speech" drift from
+"picture vs. audio" drift, the two failure modes production QC needs to
+tell apart.
 """
 from __future__ import annotations
 
@@ -51,8 +51,8 @@ def _detect_onsets(video_path: str, onset_threshold_std: float = 1.5,
     """Simple energy-based onset picker: local maxima where envelope crosses
     `onset_threshold_std` standard deviations above its mean, at least
     `min_gap_s` apart. Adequate for the synthetic beep benchmark and as a
-    drop-in slot for a proper VAD (e.g. Silero-VAD) once real speech content
-    is wired in during Milestone 3.
+    drop-in slot for a proper VAD (e.g. Silero-VAD) once real speech
+    content is wired in.
     """
     sig = extract_audio_envelope(video_path)
     if len(sig.values) == 0:

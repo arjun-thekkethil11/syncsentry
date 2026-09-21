@@ -64,6 +64,7 @@ def cmd_fix(args: argparse.Namespace) -> None:
         av_min_confidence=args.av_min_confidence,
         use_syncnet=args.use_syncnet,
         syncnet_min_confidence=args.syncnet_min_confidence,
+        use_mtdvocalist=args.use_mtdvocalist,
     )
     print(summary.to_text())
 
@@ -74,7 +75,7 @@ def cmd_classify_drift(args: argparse.Namespace) -> None:
 
     windows = estimate_windowed_offsets(args.video, window_s=args.window_s)
     if len(windows) < 3:
-        print(f"Only {len(windows)} confident scene(s) found -- not enough to classify a title-level "
+        print(f"Only {len(windows)} confident scene(s) found, not enough to classify a title-level "
               f"pattern (need >= 3). Try a longer asset or a smaller --window-s.")
         return
 
@@ -151,20 +152,31 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--caption-threshold-ms", type=float, default=80.0)
     p.add_argument("--av-min-confidence", type=float, default=0.3,
                     help="Below this cross-correlation confidence, treat the A/V offset as "
-                         "undetermined rather than 'detected' -- avoids 'fixing' noise on real "
-                         "talking-head content (see docs/RESEARCH.md section 1b)")
-    p.add_argument("--use-syncnet", action="store_true",
-                    help="Use the pretrained SyncNet model (M3c) instead of the fast coarse "
-                         "detector -- far more accurate on real talking-head content (see "
-                         "docs/RESEARCH.md section 1e), but takes minutes per video (real face "
-                         "detection/tracking + a CNN, run on CPU) instead of seconds. Requires "
-                         "`bash analyzer/scripts/fetch_syncnet.sh` to have been run once; falls "
-                         "back to the coarse detector with a note if it hasn't, or if no "
-                         "trackable face is found.")
+                         "undetermined rather than 'detected'; avoids 'fixing' noise on real "
+                         "talking-head content")
+    p.add_argument("--use-syncnet", dest="use_syncnet", action="store_true", default=True,
+                    help="Use the pretrained SyncNet model instead of the fast coarse "
+                         "detector. Far more accurate on real talking-head content, but takes "
+                         "minutes per video (face detection/tracking plus a CNN, run on CPU) "
+                         "instead of seconds. Requires `bash analyzer/scripts/fetch_syncnet.sh` "
+                         "to have been run once; falls back to the coarse detector with a note "
+                         "if it hasn't, or if no trackable face is found. On by default to "
+                         "match the webapp/API default; pass --no-syncnet for the old, "
+                         "fast-but-weaker opt-out behavior.")
+    p.add_argument("--no-syncnet", dest="use_syncnet", action="store_false",
+                    help="Opt out of SyncNet, use only the fast coarse cross-correlation "
+                         "detector (a few seconds, less reliable on real talking-head/dialogue "
+                         "content).")
     p.add_argument("--syncnet-min-confidence", type=float, default=3.0,
                     help="Below this SyncNet confidence (a different, non-[0,1] scale than "
                          "--av-min-confidence), treat the offset as undetermined. Only used "
                          "with --use-syncnet.")
+    p.add_argument("--use-mtdvocalist", action="store_true",
+                    help="Only tried if --use-syncnet's own windowed corroboration fails "
+                         "outright. Off by default: several more minutes of CPU work (its own "
+                         "face-detection pass plus dozens of transformer calls) for a case "
+                         "that's already ambiguous, and its answer isn't automatically more "
+                         "trustworthy than SyncNet's own.")
     p.set_defaults(func=cmd_fix)
 
     p = sub.add_parser("classify-drift", help="Classify a title's sync-drift pattern (constant/drift/intermittent)")

@@ -1,13 +1,13 @@
 """Synthetic ground-truth fixture generator.
 
-Every published A/V-sync paper (DiVAS, SyncNet, ModEFormer, UniSync -- see
-docs/RESEARCH.md) validates offset-recovery accuracy by injecting a *known*
-offset into clean, in-sync material and checking whether the detector
-recovers it. We do the same thing here with a fully synthetic, license-free
-"flash + beep" clapperboard-style pattern instead of real footage, so the
-benchmark harness has zero dependency on copyrighted or restricted-access
-datasets (LRS2/LRS3 etc. require request-based access) and is 100%
-reproducible in CI.
+Published A/V-sync papers (DiVAS, SyncNet, ModEFormer, UniSync) validate
+offset-recovery accuracy by injecting a known offset into clean, in-sync
+material and checking whether the detector recovers it. This module does
+the same with a fully synthetic, license-free "flash + beep"
+clapperboard-style pattern instead of real footage, so the benchmark
+harness has zero dependency on copyrighted or restricted-access datasets
+(LRS2/LRS3 etc. require request-based access) and is 100% reproducible in
+CI.
 
 Video: a white full-frame flash for `pulse_ms` every `period_s`, on a black
 background, rendered at `fps`.
@@ -50,9 +50,7 @@ class FixtureSpec:
 def _synthesize_audio(spec: FixtureSpec) -> np.ndarray:
     """Sample-accurate gated sine burst (numpy), avoiding ffmpeg's frame-block
     quantized filter evaluation and any lossy-codec encoder delay, both of
-    which introduce several-millisecond, slightly non-constant timing error
-    (see docs/RESEARCH.md, "fixture generator calibration" for the debugging
-    trail that led here).
+    which introduce several-millisecond, slightly non-constant timing error.
     """
     n = int(round(spec.duration_s * spec.sr))
     t = np.arange(n, dtype=np.float64) / spec.sr
@@ -106,9 +104,9 @@ def _synthesize_audio_piecewise(duration_s: float, sr: int, period_s: float, pul
     offset at time t is linearly interpolated between `control_points`
     (t_seconds, offset_ms) instead of held constant. This is what lets us
     build synthetic "drift-early", "drift-late", and "intermittent" titles
-    for testing `syncsentry.lipsync.title_drift` -- the same ground-truth-
-    injection methodology as the rest of this project, just with a
-    time-varying offset instead of a single number.
+    for testing `syncsentry.lipsync.title_drift`, using the same
+    ground-truth-injection methodology as the rest of this project, just
+    with a time-varying offset instead of a single number.
     """
     n = int(round(duration_s * sr))
     t = np.arange(n, dtype=np.float64) / sr
@@ -176,12 +174,9 @@ def generate_captions(out_vtt: str | Path, spec: FixtureSpec, caption_offset_ms:
     Cue generation starts at k=1 (skipping the pulse at t=0), not k=0. WebVTT
     timestamps can't be negative, so a large negative caption_offset_ms would
     otherwise silently clamp the very first cue's ground-truth start time to
-    0.000 -- corrupting that one cue's ground truth without erroring, which
-    is exactly the kind of thing that's obvious in hindsight and invisible
-    until a round-trip test catches it (it did: see
-    tests/test_fixer.py::test_caption_fix_round_trip). Starting at k=1 gives
-    every cue a full `period_s` of head-room, comfortably more than the
-    +/-300ms offsets exercised in this project's tests/benchmarks.
+    0.000, corrupting that one cue's ground truth without erroring. Starting
+    at k=1 gives every cue a full `period_s` of head-room, comfortably more
+    than the +/-300ms offsets exercised in this project's tests/benchmarks.
     """
     out_vtt = Path(out_vtt)
     out_vtt.parent.mkdir(parents=True, exist_ok=True)
@@ -189,7 +184,7 @@ def generate_captions(out_vtt: str | Path, spec: FixtureSpec, caption_offset_ms:
     def fmt(t: float) -> str:
         if t < 0.0:
             raise ValueError(
-                f"caption cue start {t:.3f}s is negative -- increase period_s or reduce "
+                f"caption cue start {t:.3f}s is negative, increase period_s or reduce "
                 f"caption_offset_ms so every cue keeps positive head-room."
             )
         h = int(t // 3600)

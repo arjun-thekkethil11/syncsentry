@@ -1,14 +1,13 @@
 """Real speech-activity detection via Silero VAD.
 
 The caption-drift checker (`syncsentry.captions.drift_check`) uses a simple
-energy-threshold onset picker, which is deliberately *not* a speech
-detector -- it's tuned to find the rising edge of a synthetic tone pulse in
-our own generated fixtures (see `docs/RESEARCH.md`). Real captions are
-timed against real speech, which doesn't look like a clean tone pulse, so
-Milestone 3b needs an actual voice-activity detector. Silero VAD is a small
-(~2MB) pretrained model shipped as a pip package (`silero-vad`) with the
-model weights bundled -- no separate download step, unlike the face
-detector's ONNX file.
+energy-threshold onset picker, which is deliberately not a speech
+detector: it's tuned to find the rising edge of a synthetic tone pulse in
+generated fixtures. Real captions are timed against real speech, which
+doesn't look like a clean tone pulse, so this module uses an actual
+voice-activity detector. Silero VAD is a small (~2MB) pretrained model
+shipped as a pip package (`silero-vad`) with the model weights bundled: no
+separate download step, unlike the face detector's ONNX file.
 
 Implementation note: `silero_vad.read_audio` calls `torchaudio.load`, which
 in torchaudio>=2.9 requires the separate `torchcodec` package for file I/O.

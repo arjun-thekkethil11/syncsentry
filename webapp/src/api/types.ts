@@ -1,13 +1,22 @@
 // Mirrors syncsentry.report.summary.FixSummary.to_dict() plus the extra
-// fields the API layer (analyzer/syncsentry/api.py) adds for the webapp
-// (job_id, input_*, processing_time_s, used_syncnet, download_urls).
+// fields the API layer adds for the webapp (job_id, input_*,
+// processing_time_s, used_syncnet, download_urls).
 
 export interface IssueReport {
   name: string; // "A/V sync" | "Captions"
+  // Authoritative outcome set by the backend. Always use this rather
+  // than re-deriving a verdict client-side. "undetermined" covers
+  // several different backend reasons (low confidence, no trackable
+  // face, no matching caption/speech onset pairs), all of which render
+  // the same way here: not as "in sync".
+  status: "in_sync" | "fixed" | "not_fixed" | "undetermined";
   had_issue: boolean;
   detected_offset_ms: number | null;
   fixed: boolean;
   residual_offset_ms: number | null;
+  // Confidence of the residual re-measurement itself, distinct from
+  // `confidence` below, which is the original detection's confidence.
+  residual_confidence: number | null;
   note: string | null;
   // "A/V sync": confidence/min_confidence from the coarse or SyncNet
   // detector, method is "coarse" | "syncnet".
@@ -15,9 +24,22 @@ export interface IssueReport {
   // unmatched_count), method is null.
   confidence: number | null;
   min_confidence: number | null;
-  method: "coarse" | "syncnet" | null;
+  // "piecewise": the video does not fit one global offset. Different
+  // regions were independently detected and corrected. See `segments`
+  // for the per-region breakdown.
+  method: "coarse" | "syncnet" | "mtdvocalist" | "piecewise" | null;
   matched_count: number | null;
   unmatched_count: number | null;
+  // Only present when method === "piecewise": one entry per detected
+  // region of the video, in chronological order.
+  segments: IssueSegment[] | null;
+}
+
+export interface IssueSegment {
+  start_s: number;
+  end_s: number;
+  offset_ms: number | null;
+  status: "trusted" | "undetermined";
 }
 
 export interface FixResponse {

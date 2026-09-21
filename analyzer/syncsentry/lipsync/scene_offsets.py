@@ -1,21 +1,20 @@
 """Per-window A/V offset estimation across a whole title.
 
 DiVAS (CVPR 2024) gets its title-level drift classification by making an
-offset prediction *per dialogue scene*, then regressing across scenes. The
-real version of "per scene" needs face detection + speech-activity overlap
-(see `syncsentry.lipsync.face_scenes`, and the M3b note in docs/ROADMAP.md
-about why the estimator itself -- a pretrained lip-sync embedding model --
-is deferred until real content is available to validate it against).
+offset prediction per dialogue scene, then regressing across scenes. The
+real version of "per scene" needs face detection plus speech-activity
+overlap (see `syncsentry.lipsync.dialogue_scenes`); a pretrained lip-sync
+embedding model as the per-scene estimator itself is deferred until real
+content is available to validate it against.
 
-This module provides the *statistical* half of that pipeline right now:
-fixed-length sliding windows across the full audio/video envelope, with our
-already-validated Tier-1 cross-correlation estimator (`coarse_xcorr`)
-computing an offset for each window. It's a legitimate per-scene offset
-estimator on its own for content where energy-based correlation works (loud,
-punctuated audio events), and it's the exact interface
-(`list[SceneOffset]` -> `syncsentry.lipsync.title_drift`) that a future
-learned per-scene estimator slots into without changing the classification
-code at all.
+This module provides the statistical half of that pipeline: fixed-length
+sliding windows across the full audio/video envelope, with the existing
+cross-correlation estimator (`coarse_xcorr`) computing an offset for each
+window. It's a legitimate per-scene offset estimator on its own for
+content where energy-based correlation works (loud, punctuated audio
+events), and it's the exact interface (`list[SceneOffset]` ->
+`syncsentry.lipsync.title_drift`) that a future learned per-scene
+estimator slots into without changing the classification code at all.
 """
 from __future__ import annotations
 
@@ -41,7 +40,7 @@ def estimate_windowed_offsets(video_path: str, window_s: float = 3.0, hop_s: flo
     """Slide a `window_s`-wide window across the whole title (hop `hop_s`,
     default = window_s/2 for 50% overlap) and estimate an A/V offset for
     each window independently. Windows whose peak correlation confidence
-    falls below `min_confidence` are dropped -- a window with no strong
+    falls below `min_confidence` are dropped: a window with no strong
     audio/video events to correlate against produces a meaningless estimate,
     and DiVAS handles this the same way (dropping low-confidence per-scene
     predictions before the title-level regression).

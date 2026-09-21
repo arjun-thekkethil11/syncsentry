@@ -1,29 +1,27 @@
-"""End-to-end "detect, fix, prove it worked" pipeline for a single asset.
+"""End-to-end detect/fix/verify pipeline for a single asset.
 
-This is the thing an actual user runs: point it at a video (and optionally
-a caption file), get back a corrected video/captions and a short report.
+Given a video (and optionally a caption file), produces a corrected
+video/captions and a short report.
 
-Order of operations matters and is deliberate:
+Order of operations:
 
   1. Detect the A/V offset on the *original* video.
-  2. Fix it (if above threshold) -> produces a corrected video.
-  3. Re-measure the A/V offset on the *corrected* video. This is real
-     validation, not just trusting the fix -- and it's how the periodic
-     cross-correlation ambiguity bug and the -itsoffset-does-nothing bug
-     earlier in this project were actually caught.
+  2. Fix it (if above threshold), producing a corrected video.
+  3. Re-measure the A/V offset on the *corrected* video to verify the fix,
+     rather than trusting the detector's own estimate.
   4. If captions were provided: detect caption drift against the
-     *corrected* video's audio (not the original). This matters because
-     step 2 may have physically shifted the audio track's timeline (e.g.
-     trimmed samples off the front), so measuring against the original
-     audio would silently give the wrong number for what to apply to the
-     new captions.
-  5. Fix caption drift (if above threshold) -> produces corrected captions.
-  6. Re-measure caption drift on (corrected video, corrected captions) to
+     *corrected* video's audio, not the original. Step 2 may have
+     physically shifted the audio track's timeline (e.g. trimmed samples
+     off the front), so measuring against the original audio would give
+     the wrong offset to apply to the new captions.
+  5. Fix caption drift (if above threshold), producing corrected captions.
+  6. Re-measure caption drift on the corrected video and captions to
      confirm.
 
 Every step re-measures against the actual output of the previous step
-rather than composing corrections algebraically -- simpler to reason about
-and robust to changes in how the individual fixers work.
+rather than composing corrections algebraically. This is simpler to
+reason about and stays robust to changes in how the individual fixers
+work.
 """
 from __future__ import annotations
 
@@ -34,6 +32,7 @@ from syncsentry.captions.drift_check import check_caption_drift
 from syncsentry.detectors.coarse_xcorr import estimate_av_offset
 from syncsentry.fixer.av_fix import fix_av_offset
 from syncsentry.fixer.caption_fix import fix_caption_offset
+from syncsentry.lipsync import mtdvocalist_offset
 from syncsentry.lipsync.syncnet_offset import (
     DEFAULT_SYNCNET_MIN_CONFIDENCE,
     SyncNetUnavailable,
@@ -41,18 +40,82 @@ from syncsentry.lipsync.syncnet_offset import (
 )
 from syncsentry.report.summary import IssueSummary, SyncFixSummary
 
+# Aggregate confidence a *corroborated* (>= 3 agreeing windows) MTDVocaLiST
+# estimate needs before it's trusted over SyncNet's own uncorroborated
+# whole-track fallback. Set well below the ~8.0 typically seen on a good
+# match: corroboration count carries the real precision here, this
+# threshold just filters out clearly-nothing tracks.
+DEFAULT_MTDVOCALIST_MIN_CONFIDENCE = 5.0
+
 DEFAULT_AV_THRESHOLD_MS = 40.0  # ~1 frame at 25fps; tune per deployment
 DEFAULT_CAPTION_THRESHOLD_MS = 80.0
-# Matches the confidence gate already used by the windowed per-scene
-# estimator (syncsentry/lipsync/scene_offsets.py). Found necessary here too
-# via a real bug report: on real talking-head/dialogue content, global
-# frame-brightness cross-correlation produces "confident-looking" but
-# spurious offsets (see docs/RESEARCH.md section 1b) -- without this gate,
-# the pipeline would "fix" an offset that was never really there, and the
-# re-measurement afterward (also unreliable on the same content) could
-# easily report the exact same bogus number as a "residual", i.e. a fix
-# that visibly did nothing while still being labeled FIXED.
+# Matches the confidence gate used by the windowed per-scene estimator
+# (syncsentry/lipsync/scene_offsets.py). On real talking-head/dialogue
+# content, global frame-brightness cross-correlation can produce
+# confident-looking but spurious offsets. Without this gate the pipeline
+# could "fix" an offset that isn't really there, and the re-measurement
+# afterward (equally unreliable on the same content) could report the
+# same bogus number as a "residual", i.e. a fix that did nothing while
+# still being labeled FIXED.
 DEFAULT_AV_MIN_CONFIDENCE = 0.3
+
+# The evidence bar for declaring "in sync" (a silent no-op: the corrected
+# file is a byte-for-byte passthrough) must be at least as strong as the
+# bar for declaring "an offset was found" (which gets its own independent
+# post-fix verification pass as a safety net). A near-zero offset reported
+# off SyncNet's uncorroborated whole-track fallback (`n_confident_windows
+# == 0`, no independent window agreed with any other) should not clear
+# the same confidence bar and get reported as confidently "in sync"
+# without multiple independent windows actually agreeing on it. Matches
+# `min_cluster_size` in `syncnet_offset.estimate_syncnet_offset`: the same
+# corroboration bar used to accept a *nonzero* offset is required here to
+# accept a *zero* one.
+MIN_CONFIDENT_WINDOWS_FOR_TRUSTED_IN_SYNC = 3
+
+# Left at the default (`None` -> `estimate_syncnet_offset`'s own 20s)
+# rather than shrinking the post-correction verification window to cut
+# S3FD face-detection cost (the pipeline's dominant per-call cost, scaling
+# close to linearly with frame count). A shorter window can land on a
+# stretch of the clip with materially weaker face/speech evidence,
+# producing a low-confidence, unusable residual reading instead of a
+# confident small residual. Verification only needs to confirm a small
+# remaining offset, not search for a possibly-large one, but a safe
+# speedup would need a face-presence pre-check to skip shrinking on
+# windows that don't have enough coverage, rather than a fixed shorter
+# duration. `pipeline._detect_av_offset`'s `max_analyze_duration_s`
+# parameter is kept (unused by any call site below) since the plumbing
+# itself is still correct.
+RESIDUAL_VERIFY_MAX_ANALYZE_DURATION_S = None
+
+# At least this many genuinely-corrected regions are required before
+# taking the separate piecewise report/fix path over the normal
+# single-global-offset one.
+#
+# 1, not 2: the classical pre-check (`piecewise_offset.
+# MIN_SEGMENTS_FOR_PIECEWISE`) already independently requires >= 2
+# mutually-disagreeing trusted regions before calling a clip "piecewise"
+# at all, so that structural evidence exists by the time SyncNet
+# refinement runs. Refinement's job is to confirm or correct each
+# candidate's value (or abstain), not to re-decide whether the clip is
+# piecewise, so refinement confirming only one candidate as trusted and
+# worth fixing is still a real, verified fix. Requiring a second
+# confirmed region would discard that fix and fall back to applying one
+# single-global number to the entire clip, which is worse: guessing on
+# the whole timeline is not safer than confidently fixing the one region
+# with real evidence and leaving the rest honestly "undetermined" (see
+# `_maybe_fix_piecewise`'s per-segment status reporting: an undetermined
+# region is never silently reported as fixed).
+MIN_FIXED_SEGMENTS_FOR_PIECEWISE_PATH = 1
+
+# If more than this fraction of the video's own duration ends up
+# "undetermined" after refinement, the overall issue is reported
+# "not_fixed" (attention needed), even when zero regions were confidently
+# found bad; see `_maybe_fix_piecewise` for the full reasoning. 20%, not
+# 0%: a small undetermined sliver (e.g. a few seconds of no-face
+# lead-in/credits) is normal and expected even on content this path
+# genuinely resolves. This only trips when most of the timeline is
+# unverified rather than resolved.
+MAX_UNDETERMINED_FRACTION_FOR_PIECEWISE_FIXED = 0.20
 
 
 @dataclass
@@ -60,27 +123,77 @@ class _AVDetection:
     offset_ms: float
     confidence: float
     direction: str
-    min_confidence: float  # threshold to compare `confidence` against -- differs by method
-    method: str  # "coarse" | "syncnet"
+    min_confidence: float  # threshold to compare `confidence` against: differs by method
+    method: str  # "coarse" | "syncnet" | "mtdvocalist"
     fallback_note: str | None  # set when --use-syncnet was requested but couldn't run
+    # Independent corroboration count (SyncNet/MTDVocaLiST only; `None` for
+    # "coarse", which has no windowing concept). 0 means the whole-track
+    # fallback was used: a single, uncorroborated reading. Declaring
+    # "in_sync" (a silent no-op) requires stronger evidence than declaring
+    # "offset detected" (which gets an independent post-fix verification
+    # pass as its own safety net); holding both to the same bar would let
+    # a low-evidence in-sync claim pass silently.
+    n_confident_windows: int | None = None
 
 
 def _detect_av_offset(video_path: str, av_threshold_ms: float, use_syncnet: bool,
-                       syncnet_min_confidence: float, av_min_confidence: float) -> _AVDetection:
-    """Picks which detector actually runs. SyncNet (M3c, see
-    docs/RESEARCH.md section 1e) is far more accurate on real talking-head
-    content than the coarse detector, but takes ~minutes per video (real
-    face detection/tracking + a CNN) versus ~seconds -- so it's opt-in
-    (`use_syncnet=True`), not the silent default. Falls back to the coarse
-    detector (with a note explaining why) if SyncNet isn't fetched or finds
-    no trackable face.
+                       syncnet_min_confidence: float, av_min_confidence: float,
+                       use_mtdvocalist: bool = False,
+                       recenter_large_offsets: bool = True,
+                       max_analyze_duration_s: float | None = None) -> _AVDetection:
+    """Picks which detector actually runs.
+
+    SyncNet is far more accurate on real talking-head content than the
+    coarse detector, but takes minutes per video (face detection/tracking
+    plus a CNN) versus seconds, so it's opt-in (`use_syncnet=True`) rather
+    than the default. Falls back to the coarse detector (with a note
+    explaining why) if SyncNet isn't fetched or finds no trackable face.
+
+    `use_mtdvocalist` (default `False`): if SyncNet's own windowed
+    corroboration doesn't clear the bar (`n_confident_windows == 0`), and
+    this is explicitly requested, also tries MTDVocaLiST, a second,
+    independent scorer over the same face-track evidence that works with
+    far fewer independent samples than SyncNet needs. Off by default: it
+    adds real latency (its own face-detection pass plus dozens of CPU
+    transformer calls) for a case that's already ambiguous by definition,
+    and its answer isn't automatically more trustworthy than SyncNet's.
+    Still worth trying deliberately when SyncNet alone can't decide.
+
+    `recenter_large_offsets` (default `True`): forwarded to
+    `estimate_syncnet_offset`. Set `False` for the post-correction
+    verification call in `run_fix_pipeline`: a genuine post-fix residual
+    should be small (well inside SyncNet's native +-600ms range), and
+    re-running the wide-range seed on an already-corrected file is
+    unreliable because the trim-based fix leaves the corrected file's
+    audio shorter than its video (see `fixer/av_fix.py`), a shape the
+    wide-range mouth-motion detector isn't validated against.
+
+    `max_analyze_duration_s` (default `None`, meaning "use
+    `estimate_syncnet_offset`'s own default"): forwarded as-is. See
+    `RESIDUAL_VERIFY_MAX_ANALYZE_DURATION_S` above for the one caller that
+    passes something other than the default.
     """
     fallback_note = None
     if use_syncnet:
+        syncnet_kwargs = {}
+        if max_analyze_duration_s is not None:
+            syncnet_kwargs["max_analyze_duration_s"] = max_analyze_duration_s
         try:
-            est = estimate_syncnet_offset(video_path, in_sync_threshold_ms=av_threshold_ms)
+            est = estimate_syncnet_offset(video_path, in_sync_threshold_ms=av_threshold_ms,
+                                           recenter_large_offsets=recenter_large_offsets, **syncnet_kwargs)
+            if use_mtdvocalist and est.n_confident_windows == 0 and mtdvocalist_offset.is_available():
+                try:
+                    mtdv_est = mtdvocalist_offset.estimate_mtdvocalist_offset(
+                        video_path, in_sync_threshold_ms=av_threshold_ms)
+                    if mtdv_est.n_confident_windows >= 3:
+                        return _AVDetection(mtdv_est.offset_ms, mtdv_est.confidence, mtdv_est.direction,
+                                             DEFAULT_MTDVOCALIST_MIN_CONFIDENCE, "mtdvocalist", None,
+                                             n_confident_windows=mtdv_est.n_confident_windows)
+                except (ValueError, mtdvocalist_offset.MTDVocaLiSTUnavailable):
+                    pass  # SyncNet's own (uncorroborated) answer below is still the honest fallback
             return _AVDetection(est.offset_ms, est.confidence, est.direction,
-                                 syncnet_min_confidence, "syncnet", None)
+                                 syncnet_min_confidence, "syncnet", None,
+                                 n_confident_windows=est.n_confident_windows)
         except SyncNetUnavailable as exc:
             fallback_note = f"--use-syncnet requested but unavailable ({exc}); used the coarse detector instead"
         except ValueError as exc:
@@ -91,60 +204,187 @@ def _detect_av_offset(video_path: str, av_threshold_ms: float, use_syncnet: bool
                          av_min_confidence, "coarse", fallback_note)
 
 
+def _maybe_fix_piecewise(video_path: str, corrected_video_path: Path, av_threshold_ms: float,
+                          syncnet_min_confidence: float) -> IssueSummary | None:
+    """Attempts the piecewise (independent per-region) A/V sync path.
+
+    See `syncsentry.lipsync.piecewise_offset`'s module docstring for why
+    this exists: content assembled from multiple independently-offset
+    sources (e.g. a multi-camera edit, or clips stitched together from
+    different recordings) violates the single-global-offset assumption
+    every other branch of this pipeline makes. Confidently applying one
+    detected offset to the whole file in that case only fixes the region
+    the offset came from and makes every other region's error worse.
+
+    Returns `None` (falls through to the normal single-global-offset path,
+    unchanged) whenever there isn't clear, multi-region evidence that a
+    single offset genuinely doesn't describe this file. Deliberately
+    conservative: a single-source upload, the overwhelming common case,
+    must never take this branch by mistake, and every gate here (the
+    classical pre-check's own `piecewise_offset.
+    MIN_SEGMENTS_FOR_PIECEWISE`, plus `MIN_FIXED_SEGMENTS_FOR_PIECEWISE_PATH`
+    below) exists specifically to enforce that.
+    """
+    from syncsentry.fixer.piecewise_fix import fix_piecewise_offsets
+    from syncsentry.lipsync.piecewise_offset import (
+        OffsetSegment,
+        detect_piecewise_offsets,
+        refine_piecewise_segments_with_syncnet,
+    )
+
+    try:
+        pre = detect_piecewise_offsets(video_path)
+    except ValueError:
+        return None  # not enough dialogue-scene signal to attempt this; normal path handles it
+    if not pre.is_piecewise:
+        return None
+
+    refined = refine_piecewise_segments_with_syncnet(video_path, pre.segments,
+                                                       min_confidence=syncnet_min_confidence)
+    fixable = [s for s in refined if s.status == "trusted" and s.offset_ms is not None
+               and abs(s.offset_ms) > av_threshold_ms]
+    if len(fixable) < MIN_FIXED_SEGMENTS_FOR_PIECEWISE_PATH:
+        # SyncNet refinement didn't corroborate enough independently
+        # different regions to justify the piecewise path (it may have
+        # downgraded some or all of the classical pre-check's candidates
+        # to "undetermined"; see that function's docstring). Let the
+        # normal single-global path make its own attempt instead of
+        # reporting a piecewise result with little or nothing to show
+        # for it.
+        return None
+
+    fix_piecewise_offsets(video_path, corrected_video_path, refined)
+
+    # Verification: re-check the corrected output, but only at the exact
+    # time ranges that were actually shifted (`fixable`), not a second
+    # full-clip re-scan across every region (including ones already left
+    # "undetermined"/untouched, or already-in-sync regions the fixer
+    # never touched). A full re-scan would re-discover the same candidate
+    # regions (the corrected file's content is unchanged aside from a few
+    # regions' shifted audio) and re-pay a full SyncNet call for regions
+    # that were never fixed and have nothing new to verify; cost would
+    # scale with how many candidate regions exist rather than how many
+    # were actually changed.
+    #
+    # Building the verification segment list directly from `fixable`
+    # (same start_s/end_s the fixer itself just used) is exact:
+    # `fix_piecewise_offsets` only shifts audio within each segment's
+    # existing time range, so re-checking that same range in the
+    # corrected file checks precisely the span whose offset should now
+    # read near zero if the fix worked.
+    #
+    # A genuinely successful per-region fix should leave no such range
+    # SyncNet can confidently re-corroborate as still offset by more than
+    # `av_threshold_ms`, mirroring the single-global path's own post-fix
+    # re-measurement (see `run_fix_pipeline` below). An inconclusive
+    # verification (no confident re-reading either way) is treated
+    # leniently, failing open toward "fixed", rather than paying a third
+    # full SyncNet pass per segment to disambiguate. This is a
+    # deliberately simpler bar than the single-global path's, given the
+    # added cost of getting a segment-level answer at all.
+    verify_segments = [
+        OffsetSegment(start_s=s.start_s, end_s=s.end_s, offset_ms=s.offset_ms,
+                       confidence=s.confidence, status="trusted", n_chunks=s.n_chunks)
+        for s in fixable
+    ]
+    verify_refined = refine_piecewise_segments_with_syncnet(
+        str(corrected_video_path), verify_segments, min_confidence=syncnet_min_confidence)
+    residual_confident_and_bad = any(
+        s.status == "trusted" and s.offset_ms is not None and abs(s.offset_ms) > av_threshold_ms
+        for s in verify_refined
+    )
+
+    seg_dicts = [
+        {"start_s": round(s.start_s, 2), "end_s": round(s.end_s, 2), "offset_ms": s.offset_ms, "status": s.status}
+        for s in refined
+    ]
+
+    undetermined_fraction = _undetermined_duration_fraction(refined)
+    substantial_undetermined = undetermined_fraction > MAX_UNDETERMINED_FRACTION_FOR_PIECEWISE_FIXED
+
+    note = (f"content doesn't fit a single global A/V offset: found {len(refined)} region(s) with "
+            f"independently different sync, corrected {len(fixable)} of them independently rather than "
+            f"applying one offset to the whole file (see 'segments' for the per-region breakdown)")
+    if substantial_undetermined:
+        note += (f"; {undetermined_fraction:.0%} of the video's duration could not be independently "
+                 f"confirmed either way and is left unmodified. Treat this as a partial, not complete, fix")
+
+    fixed = not residual_confident_and_bad and not substantial_undetermined
+    status = "not_fixed" if (residual_confident_and_bad or substantial_undetermined) else "fixed"
+
+    return IssueSummary(
+        name="A/V sync", had_issue=True, detected_offset_ms=None, fixed=fixed,
+        residual_offset_ms=None, note=note, status=status,
+        method="piecewise", confidence=None, min_confidence=None, segments=seg_dicts,
+    )
+
+
+def _undetermined_duration_fraction(segments) -> float:
+    """Fraction of `segments`' total duration whose `status ==
+    "undetermined"`.
+
+    Used by `_maybe_fix_piecewise` (see
+    `MAX_UNDETERMINED_FRACTION_FOR_PIECEWISE_FIXED`) to stop a piecewise
+    result from claiming `status="fixed"` (and therefore
+    `SyncFixSummary.all_resolved`) when a large fraction of the video's
+    own duration is still genuinely unverified after refinement, e.g. a
+    candidate the classical pre-check flagged but SyncNet couldn't
+    corroborate (a deliberate abstention per
+    `refine_piecewise_segments_with_syncnet`'s docstring, not a bug).
+    Without this check, correcting only a couple of several flagged
+    regions could still produce an "all issues resolved" claim while most
+    of the timeline is left honestly "undetermined" in the per-segment
+    breakdown. That's the same false-confidence failure mode
+    `IssueSummary.status` and `MIN_CONFIDENT_WINDOWS_FOR_TRUSTED_IN_SYNC`
+    above exist to close for the single-global path, reached via a
+    different route: aggregating several honest per-segment abstentions
+    into one dishonest overall claim.
+
+    Returns 0.0 for an empty list (nothing to be undetermined about).
+    """
+    total_s = sum(s.end_s - s.start_s for s in segments)
+    if total_s <= 0:
+        return 0.0
+    undetermined_s = sum(s.end_s - s.start_s for s in segments if s.status == "undetermined")
+    return undetermined_s / total_s
+
+
 def run_fix_pipeline(video_path: str | Path, out_dir: str | Path,
                       captions_path: str | Path | None = None,
                       av_threshold_ms: float = DEFAULT_AV_THRESHOLD_MS,
                       caption_threshold_ms: float = DEFAULT_CAPTION_THRESHOLD_MS,
                       av_min_confidence: float = DEFAULT_AV_MIN_CONFIDENCE,
                       use_syncnet: bool = False,
-                      syncnet_min_confidence: float = DEFAULT_SYNCNET_MIN_CONFIDENCE) -> SyncFixSummary:
+                      syncnet_min_confidence: float = DEFAULT_SYNCNET_MIN_CONFIDENCE,
+                      use_mtdvocalist: bool = False) -> SyncFixSummary:
     video_path = Path(video_path)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     summary = SyncFixSummary(asset_name=video_path.name)
-
-    # --- Step 1-3: A/V sync ---
-    det = _detect_av_offset(str(video_path), av_threshold_ms, use_syncnet,
-                             syncnet_min_confidence, av_min_confidence)
     corrected_video_path = out_dir / f"{video_path.stem}.corrected{video_path.suffix}"
-    method_tag = "" if det.method == "coarse" else " [syncnet]"
 
-    if det.confidence < det.min_confidence:
-        # Not "in sync below threshold" -- we genuinely can't tell. Treating
-        # this as "no issue" (rather than guessing a fix from noise) is the
-        # honest answer; see docs/RESEARCH.md section 1b for why this
-        # triggers on real dialogue/talking-head content specifically.
-        corrected_video_path.write_bytes(video_path.read_bytes())
-        note = (f"low-confidence detection{method_tag}: raw estimate {det.offset_ms:+.0f}ms "
-                f"({det.direction}), confidence {det.confidence:.2f} (threshold {det.min_confidence:.2f}) "
-                f"-- too low to trust; not applied automatically. If your own check agrees with the "
-                f"direction, re-run with a lower confidence threshold to force it, but treat the "
-                f"result as unverified")
-        if det.fallback_note:
-            note = f"{det.fallback_note}. {note}"
-        summary.issues.append(IssueSummary(
-            name="A/V sync", had_issue=False, detected_offset_ms=det.offset_ms,
-            fixed=False, residual_offset_ms=None, note=note,
-            confidence=det.confidence, min_confidence=det.min_confidence, method=det.method,
-        ))
-    elif det.direction == "in_sync":
-        corrected_video_path.write_bytes(video_path.read_bytes())
-        summary.issues.append(IssueSummary(
-            name="A/V sync", had_issue=False, detected_offset_ms=det.offset_ms,
-            fixed=False, residual_offset_ms=None, note=det.fallback_note,
-            confidence=det.confidence, min_confidence=det.min_confidence, method=det.method,
-        ))
+    # --- Step 0: piecewise pre-check ---
+    # Only attempted with SyncNet enabled: the classical pre-check alone
+    # is not reliable enough to apply a correction from directly (see
+    # `piecewise_offset.py`'s own docstring), and this path exists to add
+    # a capability the SyncNet-based path doesn't have, not to replace
+    # it. Deliberately conservative (see `_maybe_fix_piecewise`'s
+    # docstring for every gate involved): returns `None`, falling through
+    # to the unchanged single-global-offset path below, for the
+    # overwhelming common case of single-source content.
+    piecewise_issue = None
+    if use_syncnet:
+        piecewise_issue = _maybe_fix_piecewise(str(video_path), corrected_video_path,
+                                                av_threshold_ms, syncnet_min_confidence)
+
+    if piecewise_issue is not None:
+        summary.issues.append(piecewise_issue)
     else:
-        fix_av_offset(video_path, corrected_video_path, det.offset_ms)
-        residual_det = _detect_av_offset(str(corrected_video_path), av_threshold_ms, use_syncnet,
-                                          syncnet_min_confidence, av_min_confidence)
-        summary.issues.append(IssueSummary(
-            name="A/V sync", had_issue=True, detected_offset_ms=det.offset_ms,
-            fixed=(residual_det.confidence >= residual_det.min_confidence
-                   and abs(residual_det.offset_ms) <= av_threshold_ms),
-            residual_offset_ms=residual_det.offset_ms, note=det.fallback_note,
-            confidence=det.confidence, min_confidence=det.min_confidence, method=det.method,
+        # --- Step 1-3: A/V sync (single global offset) ---
+        summary.issues.append(_fix_single_global_offset(
+            video_path, corrected_video_path, av_threshold_ms, av_min_confidence,
+            use_syncnet, syncnet_min_confidence, use_mtdvocalist,
         ))
 
     summary.output_files["corrected_video"] = str(corrected_video_path)
@@ -160,27 +400,31 @@ def run_fix_pipeline(video_path: str | Path, out_dir: str | Path,
         cap_confidence = (cap_matched / cap_total) if cap_total > 0 else None
 
         if cap_report.median_offset_ms is None:
+            # No speech onsets to compare against at all: genuinely
+            # undetermined, not confirmed in sync (same principle as the
+            # A/V "undetermined" states above).
             note = "no matching speech onsets found"
             corrected_captions_path.write_text(captions_path.read_text(encoding="utf-8"), encoding="utf-8")
             summary.issues.append(IssueSummary(
                 name="Captions", had_issue=False, detected_offset_ms=None,
-                fixed=False, residual_offset_ms=None, note=note,
+                fixed=False, residual_offset_ms=None, note=note, status="undetermined",
                 confidence=cap_confidence, matched_count=cap_matched, unmatched_count=cap_unmatched,
             ))
         elif abs(cap_report.median_offset_ms) < caption_threshold_ms:
             corrected_captions_path.write_text(captions_path.read_text(encoding="utf-8"), encoding="utf-8")
             summary.issues.append(IssueSummary(
                 name="Captions", had_issue=False, detected_offset_ms=cap_report.median_offset_ms,
-                fixed=False, residual_offset_ms=None,
+                fixed=False, residual_offset_ms=None, status="in_sync",
                 confidence=cap_confidence, matched_count=cap_matched, unmatched_count=cap_unmatched,
             ))
         else:
             fix_caption_offset(captions_path, corrected_captions_path, cap_report.median_offset_ms)
             residual_report = check_caption_drift(str(corrected_video_path), str(corrected_captions_path))
             residual_ms = residual_report.median_offset_ms
+            cap_fixed = residual_ms is not None and abs(residual_ms) <= caption_threshold_ms
             summary.issues.append(IssueSummary(
                 name="Captions", had_issue=True, detected_offset_ms=cap_report.median_offset_ms,
-                fixed=(residual_ms is not None and abs(residual_ms) <= caption_threshold_ms),
+                fixed=cap_fixed, status=("fixed" if cap_fixed else "not_fixed"),
                 residual_offset_ms=residual_ms,
                 confidence=cap_confidence, matched_count=cap_matched, unmatched_count=cap_unmatched,
             ))
@@ -192,3 +436,104 @@ def run_fix_pipeline(video_path: str | Path, out_dir: str | Path,
     (out_dir / "report.json").write_text(json.dumps(summary.to_dict(), indent=2), encoding="utf-8")
 
     return summary
+
+
+def _fix_single_global_offset(video_path: Path, corrected_video_path: Path, av_threshold_ms: float,
+                               av_min_confidence: float, use_syncnet: bool, syncnet_min_confidence: float,
+                               use_mtdvocalist: bool) -> IssueSummary:
+    """The A/V sync detect/fix/verify logic for the single-global-offset
+    path, extracted into its own function so `run_fix_pipeline` can
+    choose between this and the piecewise path above without one giant
+    nested conditional."""
+    det = _detect_av_offset(str(video_path), av_threshold_ms, use_syncnet,
+                             syncnet_min_confidence, av_min_confidence, use_mtdvocalist)
+    method_tag = "" if det.method == "coarse" else f" [{det.method}]"
+
+    if det.confidence < det.min_confidence:
+        # Not "in sync below threshold": we genuinely can't tell. Treating
+        # this as "no issue" (rather than guessing a fix from noise) is the
+        # honest answer. This case is most common on real dialogue/
+        # talking-head content, where the confidence signal is weaker.
+        corrected_video_path.write_bytes(video_path.read_bytes())
+        note = (f"low-confidence detection{method_tag}: raw estimate {det.offset_ms:+.0f}ms "
+                f"({det.direction}), confidence {det.confidence:.2f} (threshold {det.min_confidence:.2f}) "
+                f"-- too low to trust; not applied automatically. If your own check agrees with the "
+                f"direction, re-run with a lower confidence threshold to force it, but treat the "
+                f"result as unverified")
+        if det.fallback_note:
+            note = f"{det.fallback_note}. {note}"
+        return IssueSummary(
+            name="A/V sync", had_issue=False, detected_offset_ms=det.offset_ms,
+            fixed=False, residual_offset_ms=None, note=note, status="undetermined",
+            confidence=det.confidence, min_confidence=det.min_confidence, method=det.method,
+        )
+    elif (det.direction == "in_sync"
+          and (det.n_confident_windows is None
+               or det.n_confident_windows >= MIN_CONFIDENT_WINDOWS_FOR_TRUSTED_IN_SYNC)):
+        # Genuinely confirmed in sync: either the coarse detector (no
+        # windowing concept, `n_confident_windows is None`) or
+        # SyncNet/MTDVocaLiST with real independent-window corroboration,
+        # not just one uncorroborated whole-track reading.
+        corrected_video_path.write_bytes(video_path.read_bytes())
+        return IssueSummary(
+            name="A/V sync", had_issue=False, detected_offset_ms=det.offset_ms,
+            fixed=False, residual_offset_ms=None, note=det.fallback_note, status="in_sync",
+            confidence=det.confidence, min_confidence=det.min_confidence, method=det.method,
+        )
+    elif det.direction == "in_sync":
+        # Reports a near-zero offset, but without the independent-window
+        # corroboration required above: a single uncorroborated
+        # whole-track reading landed near zero. Do not report this as a
+        # confirmed "in sync", since that would be a false negative.
+        # Treated the same as the low-confidence branch above (an honest
+        # "can't confirm", not a claim either way), but with its own note
+        # naming the specific reason (lack of corroboration rather than
+        # raw confidence) so the two are distinguishable.
+        corrected_video_path.write_bytes(video_path.read_bytes())
+        note = (f"uncorroborated near-zero detection{method_tag}: raw estimate {det.offset_ms:+.0f}ms, "
+                f"confidence {det.confidence:.2f} clears the trust threshold but only one whole-track "
+                f"reading supports it. No independent windows agreed (need >= "
+                f"{MIN_CONFIDENT_WINDOWS_FOR_TRUSTED_IN_SYNC}). Not confident enough to call this "
+                f"synchronized; treat as unverified rather than assuming no correction is needed")
+        if det.fallback_note:
+            note = f"{det.fallback_note}. {note}"
+        return IssueSummary(
+            name="A/V sync", had_issue=False, detected_offset_ms=det.offset_ms,
+            fixed=False, residual_offset_ms=None, note=note, status="undetermined",
+            confidence=det.confidence, min_confidence=det.min_confidence, method=det.method,
+        )
+    else:
+        fix_av_offset(video_path, corrected_video_path, det.offset_ms)
+        # `recenter_large_offsets=False`: independent verification, not a
+        # re-run of the same estimator that selected the correction. See
+        # the docstring on `_detect_av_offset`.
+        residual_det = _detect_av_offset(str(corrected_video_path), av_threshold_ms, use_syncnet,
+                                          syncnet_min_confidence, av_min_confidence,
+                                          recenter_large_offsets=False,
+                                          max_analyze_duration_s=RESIDUAL_VERIFY_MAX_ANALYZE_DURATION_S)
+        residual_confident = residual_det.confidence >= residual_det.min_confidence
+        fixed = residual_confident and abs(residual_det.offset_ms) <= av_threshold_ms
+        verify_note = det.fallback_note
+        if not fixed:
+            # Be explicit about why verification didn't confirm the fix.
+            # A bare, unexplained residual number (especially a
+            # low-confidence one) reads as "the fix made it worse", which
+            # is often not what happened: an un-gated residual
+            # re-measurement can itself be a spurious, low-confidence
+            # reading with no indication that it shouldn't be trusted.
+            confidence_note = (
+                f"residual re-check was itself low-confidence ({residual_det.confidence:.2f} < "
+                f"{residual_det.min_confidence:.2f}). The correction may still be correct; this just "
+                f"means the fix could not be independently confirmed"
+                if not residual_confident else
+                f"residual re-check confidently found a remaining {residual_det.offset_ms:+.0f}ms offset "
+                f"after the applied correction"
+            )
+            verify_note = f"{verify_note}. {confidence_note}" if verify_note else confidence_note
+        return IssueSummary(
+            name="A/V sync", had_issue=True, detected_offset_ms=det.offset_ms,
+            fixed=fixed,
+            residual_offset_ms=residual_det.offset_ms, residual_confidence=residual_det.confidence,
+            note=verify_note, status=("fixed" if fixed else "not_fixed"),
+            confidence=det.confidence, min_confidence=det.min_confidence, method=det.method,
+        )

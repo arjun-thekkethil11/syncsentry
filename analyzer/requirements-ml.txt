@@ -1,24 +1,20 @@
-# Milestone 3+ (lip-sync/dialogue-scene detection, learned per-scene estimator).
-# Installed separately from requirements-core.txt to keep the M1/M2 signal-
-# processing environment fast to set up and CI-friendly.
+# Lip-sync/dialogue-scene detection and the learned per-scene estimator.
+# Installed separately from requirements-core.txt so the signal-processing
+# only path stays fast to set up.
 torch>=2.3
 torchaudio>=2.3
 torchvision>=0.18
 scenedetect>=0.6.4
 silero-vad>=6.2
 
-# M3c: needed only if you run `bash analyzer/scripts/fetch_syncnet.sh` /
-# use `--use-syncnet` -- the vendored syncnet_python's own dependencies.
+# Needed only if you run `bash analyzer/scripts/fetch_syncnet.sh` or use
+# `--use-syncnet`: dependencies of the vendored syncnet_python.
 python_speech_features>=0.6
 tqdm>=4.0
 
-# NOTE: mediapipe is intentionally NOT used, despite being the "obvious"
-# face-detection choice. Its Tasks API initializes a Metal-backed image
-# pipeline that crashes ("Check failed: service_ Service is unavailable")
-# on macOS in this project's execution environment, even when a CPU
-# delegate is explicitly requested -- see docs/RESEARCH.md, M3b. Face
-# detection instead uses OpenCV's `cv2.FaceDetectorYN` with a small
-# (~230KB) bundled ONNX model -- no GPU dependency at all. The
-# opencv-contrib-headless build it needs is declared once in
-# requirements-core.txt (not repeated here to avoid installing two
-# conflicting `cv2` packages).
+# mediapipe is intentionally not used for face detection. Its Tasks API
+# crashes on macOS with a Metal-backed image pipeline error even with a
+# CPU delegate requested. Face detection instead uses OpenCV's
+# `cv2.FaceDetectorYN` with a small bundled ONNX model, no GPU dependency.
+# The opencv-contrib-headless build it needs is declared once in
+# requirements-core.txt to avoid installing two conflicting `cv2` packages.
