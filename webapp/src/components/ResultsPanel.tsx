@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { FixResponse } from "../api/types";
-import { downloadUrl } from "../api/client";
+import { downloadUrl, triggerDownload } from "../api/client";
 import { IssueCard } from "./IssueCard";
 import { StatusBadge } from "./StatusBadge";
 
@@ -21,6 +21,25 @@ function overallHeadline(result: FixResponse): { text: string; tone: "good" | "w
     };
   }
   return { text: "Needs your attention", tone: "warn" };
+}
+
+function filenameFromPath(path: string): string {
+  return path.split("/").pop() || "download";
+}
+
+// Cross-origin links silently ignore the `download` attribute, so a
+// plain click would navigate the whole tab to the raw file instead of
+// downloading it. Fetch it as a blob and download that instead; fall
+// back to the plain link (opens in a new tab) if the fetch fails.
+function handleDownloadClick(path: string) {
+  return async (e: React.MouseEvent<HTMLAnchorElement>) => {
+    e.preventDefault();
+    try {
+      await triggerDownload(path, filenameFromPath(path));
+    } catch {
+      window.open(downloadUrl(path), "_blank", "noopener,noreferrer");
+    }
+  };
 }
 
 export function ResultsPanel({ result, onReset }: ResultsPanelProps) {
@@ -47,6 +66,7 @@ export function ResultsPanel({ result, onReset }: ResultsPanelProps) {
               <a
                 href={downloadUrl(result.download_urls.corrected_video)}
                 download
+                onClick={handleDownloadClick(result.download_urls.corrected_video)}
                 className="rounded-lg bg-brand-500 hover:bg-brand-400 text-white text-sm font-medium px-5 py-2.5 transition-colors"
               >
                 ⬇ Download corrected video
@@ -56,6 +76,7 @@ export function ResultsPanel({ result, onReset }: ResultsPanelProps) {
               <a
                 href={downloadUrl(result.download_urls.corrected_captions)}
                 download
+                onClick={handleDownloadClick(result.download_urls.corrected_captions)}
                 className="rounded-lg border border-brand-500/40 bg-brand-500/10 hover:bg-brand-500/20 text-brand-200 text-sm font-medium px-4 py-2.5 transition-colors"
               >
                 ⬇ Corrected captions

@@ -69,3 +69,23 @@ export async function runFix(
 export function downloadUrl(path: string): string {
   return `${API_BASE_URL}${path}`;
 }
+
+/** Force a real file download rather than a navigation. The plain `<a
+ * download>` attribute is silently ignored by browsers for cross-origin
+ * links, and the API is almost always on a different origin than the
+ * webapp, so a bare link would replace the whole page with the raw
+ * video instead of downloading it. Fetching the file and downloading
+ * the resulting blob works regardless of origin. */
+export async function triggerDownload(path: string, filename: string): Promise<void> {
+  const resp = await fetch(downloadUrl(path));
+  if (!resp.ok) throw new ApiError(`Download failed with status ${resp.status}`, resp.status);
+  const blob = await resp.blob();
+  const blobUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = blobUrl;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(blobUrl);
+}
