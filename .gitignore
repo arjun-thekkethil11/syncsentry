@@ -7,11 +7,12 @@ __pycache__/
 build/
 dist/
 
-# Generated media (regenerate via `syncsentry benchmark` / `gen-fixture`)
+# Generated media and benchmark output (regenerate via `syncsentry
+# benchmark` / `gen-fixture`)
 analyzer/fixtures/*.mkv
 analyzer/fixtures/*.mp4
 analyzer/fixtures/*.vtt
-benchmark/results/_fixtures/
+benchmark/results/
 
 # Blind benchmark: generated clips and raw per-case results (regenerate via
 # analyzer/scripts/blind_benchmark/{gen_clips,run_benchmark}.py).

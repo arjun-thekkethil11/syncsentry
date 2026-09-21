@@ -13,13 +13,7 @@ Most sync tools assume one global offset for the whole file. Real content does n
 
 ## Results
 
-Measured on a held-out benchmark (clips the detector was not tuned against):
-
-- 0 confidently-wrong outcomes across 26 held-out cases
-- 100% of positive corrections landed within 40ms of true alignment
-- Offsets up to several seconds recovered via a wide-range detection pass, on top of the lip-sync model's native window
-
-Full methodology and numbers are in [`analyzer/scripts/blind_benchmark/`](analyzer/scripts/blind_benchmark/).
+Evaluated on a held-out benchmark of synthetic clips with known, injected offsets (not used to tune the detector). Methodology, generation scripts, and current numbers are in [`analyzer/scripts/blind_benchmark/`](analyzer/scripts/blind_benchmark/); run `run_benchmark.py` to reproduce them on your own machine.
 
 ## Try it
 
@@ -37,7 +31,6 @@ See [`SETUP.md`](SETUP.md) for full install steps.
 ```
 analyzer/     Python package: detection, fixing, API, CLI, tests
 webapp/       React frontend
-benchmark/    Benchmark results (committed, regenerated via the CLI)
 ```
 
 Inside `analyzer/syncsentry/`:
