@@ -43,7 +43,7 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`. It talks to the backend at `http://localhost:8000` by default; override with `VITE_API_BASE_URL` in `webapp/.env.local`.
+Open `http://localhost:5173`. Override the backend URL with `VITE_API_BASE_URL` in `webapp/.env.local`.
 
 ## Command line
 
@@ -65,16 +65,6 @@ Some analyzer tests need real content or the SyncNet weights and skip automatica
 bash analyzer/scripts/fetch_real_content.sh
 bash analyzer/scripts/fetch_syncnet.sh
 ```
-
-## Deploying
-
-`render.yaml` deploys both services on Render as a Blueprint. If you set the static
-site up manually instead, add a rewrite rule (Settings > Redirects/Rewrites) so
-client-side routes don't 404 on direct load or refresh:
-
-| Source | Destination | Action  |
-|--------|-------------|---------|
-| `/*`   | `/index.html` | Rewrite |
 
 ## Benchmark
 

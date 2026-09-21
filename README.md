@@ -22,8 +22,6 @@ uvicorn syncsentry.api:app --port 8000     # backend, from analyzer/
 cd webapp && npm install && npm run dev    # frontend
 ```
 
-Then open `http://localhost:5173` and upload a video.
-
 See [`SETUP.md`](SETUP.md) for full install steps.
 
 ## Project layout
@@ -47,6 +45,18 @@ cli.py        Command-line interface
 ## Tech
 
 Python, PyTorch, OpenCV, FFmpeg, FastAPI, React, Vite, TypeScript.
+
+## Research
+
+Built on published models rather than anything trained from scratch:
+
+- SyncNet, lip-sync scoring: Chung & Zisserman, ["Out of Time: Automated Lip Sync in the Wild"](https://www.robots.ox.ac.uk/~vgg/publications/2016/Chung16a/chung16a.pdf), ACCV Workshop 2016
+- S3FD, face detection: Zhang et al., ["S3FD: Single Shot Scale-invariant Face Detector"](https://arxiv.org/abs/1708.05237), ICCV 2017
+- Light-ASD, active speaker detection: Liao et al., ["A Light Weight Model for Active Speaker Detection"](https://arxiv.org/abs/2303.04439), CVPR 2023
+- MTDVocaLiST, short-clip sync scoring: Chen et al., ["Multimodal Transformer Distillation for Audio-Visual Synchronization"](https://arxiv.org/abs/2210.15563), ICASSP 2024, distilled from Kadandale et al., ["VocaLiST"](https://arxiv.org/abs/2204.02090), Interspeech 2022
+- Silero VAD, speech detection: [github.com/snakers4/silero-vad](https://github.com/snakers4/silero-vad)
+
+Source, license, and weight provenance for each: [`analyzer/third_party/SOURCES.md`](analyzer/third_party/SOURCES.md).
 
 ## Background
 
