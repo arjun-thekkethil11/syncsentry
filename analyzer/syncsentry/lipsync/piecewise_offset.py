@@ -609,7 +609,14 @@ def refine_piecewise_segments_with_syncnet(video_path: str, segments: list[Offse
 # modest starting point; most clips have only a handful of trusted
 # candidate segments regardless, so this rarely becomes the binding
 # constraint in practice.
-MAX_REFINE_WORKERS = 4
+#
+# Overridable via SYNCSENTRY_MAX_REFINE_WORKERS: each concurrent worker
+# eventually caches its own SyncNet model in memory (see
+# `syncnet_offset.estimate_syncnet_tracks`'s thread-local cache), so on a
+# host with little RAM to spare, 4 workers can mean 4x the model memory
+# resident at once. Set to 1 there to keep peak memory to a single
+# cached model, at the cost of refining segments one at a time.
+MAX_REFINE_WORKERS = int(os.environ.get("SYNCSENTRY_MAX_REFINE_WORKERS", "4"))
 
 # Environment variables read by the BLAS/OpenMP libraries underneath
 # torch's CPU backend (checked at each subprocess's own startup, not

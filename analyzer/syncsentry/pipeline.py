@@ -199,6 +199,16 @@ def _detect_av_offset(video_path: str, av_threshold_ms: float, use_syncnet: bool
             fallback_note = f"--use-syncnet requested but unavailable ({exc}); used the coarse detector instead"
         except ValueError as exc:
             fallback_note = f"--use-syncnet found no trackable face ({exc}); used the coarse detector instead"
+        except RuntimeError as exc:
+            # Broader net than the two cases above: covers the S3FD
+            # subprocess failing outright or exceeding
+            # SYNCSENTRY_SYNCNET_TIMEOUT_S on a slow/constrained host.
+            # Degrading to the coarse detector here (rather than letting
+            # this propagate into a 422 for the whole request, as it did
+            # before this existed) keeps the safe-fallback contract:
+            # SyncNet being unusable right now on this host is not the
+            # same as the request itself failing.
+            fallback_note = f"--use-syncnet failed ({exc}); used the coarse detector instead"
 
     coarse = estimate_av_offset(video_path, in_sync_threshold_ms=av_threshold_ms)
     return _AVDetection(coarse.offset_ms, coarse.confidence, coarse.direction,

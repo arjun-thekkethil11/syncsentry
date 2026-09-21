@@ -29,10 +29,12 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import os
 import statistics
 import subprocess
 import sys
 import tempfile
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -66,7 +68,28 @@ DEFAULT_SYNCNET_MIN_CONFIDENCE = 3.0
 # this length, since detection already needs to work well on windows this
 # size for short-clip robustness in the first place. Set to `None` (or a
 # value >= the clip's real duration) to disable and scan the full clip.
-DEFAULT_MAX_ANALYZE_DURATION_S: float | None = 20.0
+#
+# Overridable via SYNCSENTRY_MAX_ANALYZE_DURATION_S: S3FD's per-frame cost
+# is roughly fixed on a given host, so wall-clock time for this stage
+# scales close to linearly with how many seconds get analyzed. On a
+# CPU-starved host (e.g. a 0.1 vCPU free-tier instance), lowering this is
+# the most direct way to keep a single request's worst case bounded and
+# predictable, at the cost of a smaller representative sample.
+DEFAULT_MAX_ANALYZE_DURATION_S: float | None = float(
+    os.environ.get("SYNCSENTRY_MAX_ANALYZE_DURATION_S", "20.0")
+)
+
+# Overridable via SYNCSENTRY_SYNCNET_TIMEOUT_S: a hard ceiling on the S3FD
+# face-tracking subprocess (`_run_face_track_crop` below), the dominant
+# cost of this whole module. `None` (default) means no limit, matching
+# behavior before this existed. Sized generously on a constrained host
+# rather than left unbounded, so a single slow request can't run for
+# many minutes; on timeout this raises the same way S3FD failing outright
+# does, so callers already handling `RuntimeError` here fall back to the
+# coarse detector instead of the caller (or the end user) waiting
+# indefinitely.
+_SYNCNET_TIMEOUT_S_RAW = os.environ.get("SYNCSENTRY_SYNCNET_TIMEOUT_S")
+SYNCNET_TIMEOUT_S: float | None = float(_SYNCNET_TIMEOUT_S_RAW) if _SYNCNET_TIMEOUT_S_RAW else None
 
 # SyncNet's own sliding-window search only covers +-vshift frames (+-600ms
 # at the vshift=15 default): any true offset larger than that is
@@ -89,6 +112,42 @@ DEFAULT_RECENTER_MIN_COARSE_CONFIDENCE = 0.15
 
 class SyncNetUnavailable(RuntimeError):
     pass
+
+
+# One cached, loaded SyncNetInstance per thread, not a single shared
+# instance: `estimate_syncnet_tracks` can run concurrently across threads
+# (piecewise refinement's `ThreadPoolExecutor`, see `piecewise_offset.py`),
+# and nothing here has verified that `SyncNetInstance.evaluate()` is safe
+# to call on the *same* instance from multiple threads at once. A
+# thread-local avoids that question entirely: each thread gets its own
+# instance, loaded once and reused for every later call on that thread,
+# so a request that calls this twice (initial detection, then
+# post-correction verification; see `pipeline.py::_detect_av_offset`) or
+# a worker thread that gets reused across segments both skip the ~140MB
+# weight-file reload and model re-init on every call after the first.
+#
+# This does mean peak memory can grow to (weights-per-instance x number
+# of distinct threads that have ever called this), which matters on a
+# low-RAM host: see `piecewise_offset.MAX_REFINE_WORKERS` (overridable
+# via SYNCSENTRY_MAX_REFINE_WORKERS) for the knob that bounds it.
+_thread_local = threading.local()
+
+
+def _get_syncnet_instance() -> "SyncNetInstance":  # noqa: F821 - imported dynamically below
+    cached = getattr(_thread_local, "instance", None)
+    if cached is not None:
+        return cached
+
+    sys.path.insert(0, str(_SYNCNET_DIR))
+    try:
+        from SyncNetInstance import SyncNetInstance
+    finally:
+        sys.path.pop(0)
+
+    instance = SyncNetInstance()
+    instance.loadParameters(str(_MODEL_PATH))
+    _thread_local.instance = instance
+    return instance
 
 
 def is_available() -> bool:
@@ -351,7 +410,15 @@ def _run_face_track_crop(video_path: str, data_dir: Path, reference: str) -> Non
         "--data_dir", str(data_dir.resolve()),
         "--overwrite",
     ]
-    proc = subprocess.run(cmd, cwd=str(_SYNCNET_DIR), capture_output=True, text=True)
+    try:
+        proc = subprocess.run(cmd, cwd=str(_SYNCNET_DIR), capture_output=True, text=True,
+                               timeout=SYNCNET_TIMEOUT_S)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            f"SyncNet face-tracking stage exceeded the {SYNCNET_TIMEOUT_S:.0f}s budget "
+            f"(SYNCSENTRY_SYNCNET_TIMEOUT_S) and was killed; this host is likely too "
+            f"CPU-constrained to run it on this clip in a reasonable time"
+        ) from exc
     if proc.returncode != 0:
         raise RuntimeError(f"SyncNet face-tracking stage failed:\n{proc.stderr[-4000:]}")
 
@@ -522,12 +589,6 @@ def estimate_syncnet_tracks(video_path: str, vshift: int = 15, window_s: float =
     """
     _check_available()
 
-    sys.path.insert(0, str(_SYNCNET_DIR))
-    try:
-        from SyncNetInstance import SyncNetInstance
-    finally:
-        sys.path.pop(0)
-
     with crop_face_tracks(video_path, max_analyze_duration_s=max_analyze_duration_s,
                            recenter_large_offsets=recenter_large_offsets) as (
             data_dir, crop_files, pre_shift_ms):
@@ -546,8 +607,7 @@ def estimate_syncnet_tracks(video_path: str, vshift: int = 15, window_s: float =
 
         opt = argparse.Namespace(batch_size=20, vshift=vshift,
                                   tmp_dir=str(data_dir / "pytmp"), reference=reference)
-        s = SyncNetInstance()
-        s.loadParameters(str(_MODEL_PATH))
+        s = _get_syncnet_instance()
 
         window_frames = max(int(round(window_s * frame_rate)), 1)
         results = []

@@ -1,13 +1,56 @@
 services:
+  # Full build: installs torch + fetches SyncNet so use_syncnet actually
+  # runs the learned detector. On Render's free instance type (0.1 CPU /
+  # 512MB, a hard allocation, not a burstable one), the env vars below
+  # keep this bounded and safe rather than fast: SyncNet inference is
+  # still CPU-bound and will typically take several minutes per request
+  # on 0.1 CPU no matter how it's tuned. For an actually fast SyncNet
+  # path, host the API somewhere with more than a fraction of a core
+  # instead (see SETUP.md's Deploying section).
+  #
+  # To go back to the lightweight, coarse-detector-only build (faster to
+  # deploy, no torch, always falls back safely), drop requirements-ml.txt
+  # and the fetch_syncnet.sh line from buildCommand, and drop the
+  # SyncNet-specific envVars below.
   - type: web
     runtime: python
     name: syncsentry-api
     rootDir: analyzer
-    buildCommand: pip install -r requirements-core.txt -r requirements-api.txt && pip install -e .
+    buildCommand: >-
+      pip install -r requirements-core.txt -r requirements-api.txt -r requirements-ml.txt &&
+      pip install -e . &&
+      bash scripts/fetch_syncnet.sh
     startCommand: uvicorn syncsentry.api:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
+      # Avoids thread oversubscription: torch/numpy default to spawning
+      # threads based on the host machine's real core count, which on a
+      # shared/throttled instance is unrelated to the 0.1 CPU actually
+      # allocated. More threads than that just adds context-switch
+      # overhead with nothing to run them on.
+      - key: OMP_NUM_THREADS
+        value: "1"
+      - key: MKL_NUM_THREADS
+        value: "1"
+      - key: OPENBLAS_NUM_THREADS
+        value: "1"
+      # Keeps peak memory to one resident SyncNet model rather than up to
+      # MAX_REFINE_WORKERS (4) of them at once during piecewise
+      # refinement; see piecewise_offset.py's module docstring.
+      - key: SYNCSENTRY_MAX_REFINE_WORKERS
+        value: "1"
+      # Shrinks the representative window SyncNet analyzes per call.
+      # Wall-clock cost scales close to linearly with this, so smaller
+      # keeps a single request's worst case more predictable on a slow
+      # host, at the cost of a smaller sample.
+      - key: SYNCSENTRY_MAX_ANALYZE_DURATION_S
+        value: "8"
+      # Hard ceiling on the face-tracking subprocess so a single request
+      # can never hang indefinitely: past this, it aborts and falls back
+      # to the coarse detector instead of the caller waiting forever.
+      - key: SYNCSENTRY_SYNCNET_TIMEOUT_S
+        value: "180"
 
   - type: web
     runtime: static
