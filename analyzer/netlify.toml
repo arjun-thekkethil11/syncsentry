@@ -1,0 +1,2 @@
+[build]
+  command = "pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements-ml.txt && pip install -r requirements-core.txt -r requirements-api.txt && pip install -e . && bash scripts/fetch_syncnet.sh"

@@ -20,10 +20,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST="$SCRIPT_DIR/../third_party/syncnet_python"
 
 if [ ! -d "$DEST" ]; then
-  echo "Cloning joonson/syncnet_python (MIT) ..."
-  git clone --depth 1 https://github.com/joonson/syncnet_python.git "$DEST"
+  echo "Fetching joonson/syncnet_python (MIT) ..."
+  mkdir -p "$DEST"
+  curl -fL "https://github.com/joonson/syncnet_python/archive/refs/heads/master.tar.gz" \
+    | tar -xz -C "$DEST" --strip-components=1
 else
-  echo "syncnet_python already cloned, skipping."
+  echo "syncnet_python already fetched, skipping."
 fi
 
 mkdir -p "$DEST/data" "$DEST/detectors/s3fd/weights"
