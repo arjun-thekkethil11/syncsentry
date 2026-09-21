@@ -56,7 +56,21 @@ Built on published models rather than anything trained from scratch:
 - MTDVocaLiST, short-clip sync scoring: Chen et al., ["Multimodal Transformer Distillation for Audio-Visual Synchronization"](https://arxiv.org/abs/2210.15563), ICASSP 2024, distilled from Kadandale et al., ["VocaLiST"](https://arxiv.org/abs/2204.02090), Interspeech 2022
 - Silero VAD, speech detection: [github.com/snakers4/silero-vad](https://github.com/snakers4/silero-vad)
 
-Source, license, and weight provenance for each: [`analyzer/third_party/SOURCES.md`](analyzer/third_party/SOURCES.md).
+None of these models solve the actual problem on their own, each is built and
+benchmarked for a fixed-length clip with one offset. On top of them:
+
+- **Piecewise correction**: splits a video into independently-verified segments
+  instead of assuming one global offset, for compilations or edited clips where
+  each cut can carry a different offset.
+- **Wide-range detection**: extends SyncNet's native +-600ms search window to
+  recover offsets of several seconds, with a periodicity self-check so a
+  video's natural rhythm (music, repeated motion) isn't mistaken for a real
+  offset.
+- **Verification pass**: every correction is re-measured with the same
+  detector after the fix. A result is only reported as fixed if the residual
+  offset actually lands near zero, not just because a correction was applied.
+
+Source, license, and weight provenance for each model: [`analyzer/third_party/SOURCES.md`](analyzer/third_party/SOURCES.md).
 
 ## Background
 
