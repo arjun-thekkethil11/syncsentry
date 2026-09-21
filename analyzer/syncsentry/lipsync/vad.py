@@ -21,11 +21,14 @@ from __future__ import annotations
 import subprocess
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import TYPE_CHECKING
 
 import numpy as np
-import torch
 
 from syncsentry.util.ffmpeg_io import _require_binary
+
+if TYPE_CHECKING:
+    import torch
 
 SAMPLE_RATE = 16000  # Silero VAD's expected input rate
 
@@ -42,7 +45,9 @@ def _get_model():
     return load_silero_vad()
 
 
-def _load_wav_16k(path: str) -> torch.Tensor:
+def _load_wav_16k(path: str) -> "torch.Tensor":
+    import torch
+
     ffmpeg = _require_binary("ffmpeg")
     proc = subprocess.run(
         [ffmpeg, "-v", "error", "-i", path, "-f", "s16le", "-ac", "1", "-ar", str(SAMPLE_RATE), "-"],
