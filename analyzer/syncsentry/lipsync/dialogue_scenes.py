@@ -1,23 +1,21 @@
-"""Real dialogue-scene detection: face-on-screen AND speech-active, overlapping in time.
+"""Real dialogue-scene detection: face on screen AND speech active, overlapping in time.
 
-This is the piece Milestone 3a explicitly deferred (see its docstring in
-`syncsentry/lipsync/scene_offsets.py`): M3a windows a title into fixed-length
-chunks regardless of content. A real "dialogue scene" is a chunk of time
-where there's an actual face on screen *and* someone is actually talking --
-the two conditions DiVAS (CVPR 2024) requires before trusting a per-scene
-lip-sync estimate at all.
+`scene_offsets.py` windows a title into fixed-length chunks regardless of
+content. A real "dialogue scene" is a chunk of time where there's an
+actual face on screen and someone is actually talking, the two conditions
+DiVAS (CVPR 2024) requires before trusting a per-scene lip-sync estimate
+at all.
 
 Pipeline: `face_detect.detect_face_presence` (YuNet, sampled) gives a
 face-presence timeline; `vad.detect_speech_segments` (Silero VAD) gives
-speech intervals; this module intersects the two, then merges small gaps and
-drops scenes shorter than `min_duration_s` so a single dropped frame or a
-half-second pause in speech doesn't fragment one real scene into many tiny
-ones.
+speech intervals; this module intersects the two, then merges small gaps
+and drops scenes shorter than `min_duration_s` so a single dropped frame
+or a half-second pause in speech doesn't fragment one real scene into many
+tiny ones.
 
-What this module does NOT do yet: swap `scene_offsets.py`'s per-window
-*estimator* for a learned lip-sync embedding model. It restricts *where*
-that estimator would run to scenes with an actual talking face -- necessary
-groundwork, but a separate remaining piece of M3b (see docs/ROADMAP.md).
+This module restricts *where* a per-scene estimator runs to scenes with an
+actual talking face; swapping `scene_offsets.py`'s estimator itself for a
+learned lip-sync embedding model is separate, further work.
 """
 from __future__ import annotations
 

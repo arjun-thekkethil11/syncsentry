@@ -1,9 +1,8 @@
 """Benchmark harness: sweep injected offsets, measure recovery error, and
-emit a markdown table + chart. This is the same evaluate-on-synthetic-ground-
-truth methodology used by the papers cited in docs/RESEARCH.md, applied to
-SyncSentry's own detectors so results are reproducible by anyone cloning the
-repo (`python -m syncsentry.cli benchmark`) -- no restricted-access datasets
-required.
+emit a markdown table and chart. Evaluates SyncSentry's own detectors
+against synthetic ground truth, so results are reproducible by anyone
+cloning the repo (`python -m syncsentry.cli benchmark`), with no
+restricted-access datasets required.
 """
 from __future__ import annotations
 
@@ -25,9 +24,8 @@ CAPTION_OFFSETS_MS = [-300, -200, -120, -80, -30, 0, 30, 80, 120, 200, 300]
 # the pulse period (a lag of +period/2 and -period/2 produce identical
 # correlation peaks). We use a 2s period here so the sweep above (up to
 # 900ms) stays safely inside the unambiguous +/-1000ms window. Real content
-# doesn't have perfectly periodic energy, so this specific failure mode is a
-# synthetic-benchmark artifact rather than a production one -- but it's worth
-# knowing about, so it's called out in docs/RESEARCH.md rather than hidden.
+# doesn't have perfectly periodic energy, so this ambiguity is a
+# synthetic-benchmark artifact rather than a production concern.
 _AV_PERIOD_S = 2.0
 
 

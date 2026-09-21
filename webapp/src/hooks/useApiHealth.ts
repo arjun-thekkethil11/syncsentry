@@ -3,9 +3,8 @@ import { checkHealth } from "../api/client";
 
 type Status = "checking" | "up" | "down";
 
-/** Polls the analyzer's /healthz so the UI can honestly say whether the
- * backend is actually reachable, instead of only discovering that the hard
- * way when a multi-minute SyncNet run's upload immediately fails. */
+/** Polls the analyzer's /healthz endpoint so the UI can show whether the
+ * backend is reachable. */
 export function useApiHealth(intervalMs = 15000) {
   const [status, setStatus] = useState<Status>("checking");
 

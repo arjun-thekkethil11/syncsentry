@@ -1,22 +1,24 @@
-"""Mouth-region-motion A/V offset estimator -- a targeted alternative to the
+"""Mouth-region-motion A/V offset estimator: a targeted alternative to the
 whole-frame brightness detector (`syncsentry.detectors.coarse_xcorr`) for
 real talking-head content.
 
-Why: on real dialogue footage, correlating *whole-frame* brightness against
-audio energy is dominated by noise, because the only part of the frame that
-actually moves in sync with speech is the mouth -- a small fraction of total
-pixels (see docs/RESEARCH.md section 1b). Restricting the visual signal to
-the mouth region itself (located via YuNet's mouth-corner landmarks, already
-available from the M3b face detector) and restricting the time range to real
-dialogue scenes (M3b's face+speech overlap, `lipsync.dialogue_scenes`) fixes
-both problems at once, without needing a pretrained lip-sync embedding
-model. This is still classical signal processing -- same cross-correlation
-core as `coarse_xcorr.py` -- just fed a much more targeted visual signal.
-(A learned SyncNet-style embedding of this same mouth crop is the actual
-remaining M3c work; this module is what makes restricting to a *general*
-per-asset estimator, not the synthetic-fixture-tuned one, possible today.)
+On real dialogue footage, correlating whole-frame brightness against audio
+energy is dominated by noise, because the only part of the frame that
+actually moves in sync with speech is the mouth, a small fraction of total
+pixels. Restricting the visual signal to the mouth region itself (located
+via YuNet's mouth-corner landmarks, already available from the face
+detector) and restricting the time range to real dialogue scenes (face and
+speech overlap, `lipsync.dialogue_scenes`) fixes both problems at once,
+without needing a pretrained lip-sync embedding model. This is still
+classical signal processing, using the same cross-correlation core as
+`coarse_xcorr.py`, just fed a much more targeted visual signal. A learned
+SyncNet-style embedding of this same mouth crop (`syncnet_offset.py`)
+generally performs better; this module remains useful as a lighter-weight,
+model-free estimator and as the wide-range seed in `wide_range_offset.py`.
 """
 from __future__ import annotations
+
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
@@ -24,6 +26,7 @@ import numpy as np
 from syncsentry.detectors.coarse_xcorr import (
     COMMON_RATE_HZ,
     OffsetEstimate,
+    _correlation_curve,
     _normalize,
     _resample_uniform,
     estimate_offset_from_signals,
@@ -38,7 +41,7 @@ def _mouth_roi(face: np.ndarray, frame_shape: tuple[int, ...]) -> tuple[int, int
     """Bounding box around the mouth from one YuNet detection row.
 
     YuNet's output row is [x, y, w, h, x_re, y_re, x_le, y_le, x_nt, y_nt,
-    x_rcm, y_rcm, x_lcm, y_lcm, score] -- indices 10:14 are the right/left
+    x_rcm, y_rcm, x_lcm, y_lcm, score]; indices 10:14 are the right/left
     mouth-corner landmarks. Those two points only give horizontal extent, so
     vertical extent is derived from face-box height (empirically, mouth
     height is roughly 0.16x face height).
@@ -65,11 +68,11 @@ def extract_mouth_motion_signal(video_path: str, sample_fps: float = 15.0,
     within the mouth ROI, between consecutive *evaluated* samples).
 
     If `scenes` is given, only samples inside one of those (start_s, end_s)
-    intervals are evaluated -- this is what removes non-speech / no-face
-    dead time that would otherwise dilute the cross-correlation. The motion
-    diff is reset (not carried over) across any gap between evaluated
-    samples, so a scene boundary never gets diffed against a stale frame
-    from a previous, possibly-distant scene.
+    intervals are evaluated: this removes non-speech/no-face dead time that
+    would otherwise dilute the cross-correlation. The motion diff is reset
+    (not carried over) across any gap between evaluated samples, so a scene
+    boundary never gets diffed against a stale frame from a previous,
+    possibly-distant scene.
     """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -97,7 +100,7 @@ def extract_mouth_motion_signal(video_path: str, sample_fps: float = 15.0,
             t = idx / fps
             if in_scenes(t):
                 if last_eval_idx is None or idx - last_eval_idx != sample_every:
-                    prev_roi_gray = None  # gap since last evaluated sample -- don't diff across it
+                    prev_roi_gray = None  # gap since last evaluated sample: don't diff across it
                 last_eval_idx = idx
 
                 h, w = frame.shape[:2]
@@ -134,8 +137,8 @@ def extract_mouth_motion_signal(video_path: str, sample_fps: float = 15.0,
 
 def _resample_scenes(sig: Signal, scenes: list[Interval], rate_hz: float) -> np.ndarray:
     """Resample `sig` to `rate_hz` independently within each scene and
-    concatenate -- deliberately does NOT interpolate across the gaps
-    *between* scenes, which is what would reintroduce the dead-time dilution
+    concatenate. Deliberately does not interpolate across the gaps
+    *between* scenes, which would reintroduce the dead-time dilution
     problem this module exists to avoid."""
     chunks = []
     for s, e in scenes:
@@ -145,13 +148,34 @@ def _resample_scenes(sig: Signal, scenes: list[Interval], rate_hz: float) -> np.
     return np.concatenate(chunks) if chunks else np.array([])
 
 
-def estimate_mouth_sync_offset(video_path: str, scenes: list[Interval] | None = None,
-                                sample_fps: float = 15.0, search_window_ms: float = 500.0,
-                                in_sync_threshold_ms: float = 40.0) -> OffsetEstimate:
-    """Cross-correlate mouth-region motion (restricted to `scenes` if given)
-    against the audio envelope. Same core estimator as
-    `coarse_xcorr.estimate_offset_from_signals`; the difference is entirely
-    in which visual signal it's fed and where it's allowed to look.
+@dataclass
+class MouthSyncDiagnostics:
+    """Everything `estimate_mouth_sync_offset` computes internally but
+    discards after picking the single best lag: the full normalized
+    correlation curve and the normalized audio signal it was computed from.
+
+    Used by the periodicity self-check in `wide_range_offset.py`: telling
+    a uniquely tall correlation peak apart from one with comparably tall
+    neighbors spaced at the clip's own speech-rhythm period requires the
+    shape of the curve, not just its argmax.
+    """
+    estimate: OffsetEstimate
+    lags_ms: np.ndarray
+    normalized_corr: np.ndarray
+    audio_normalized: np.ndarray
+    rate_hz: float
+
+
+def estimate_mouth_sync_offset_with_diagnostics(
+        video_path: str, scenes: list[Interval] | None = None,
+        sample_fps: float = 15.0, search_window_ms: float = 500.0,
+        in_sync_threshold_ms: float = 40.0) -> MouthSyncDiagnostics:
+    """As `estimate_mouth_sync_offset`, but returns the underlying
+    correlation curve and normalized audio signal alongside the final
+    estimate. See `MouthSyncDiagnostics`. `estimate_mouth_sync_offset` below
+    is now a thin wrapper around this: kept separate so existing callers
+    that only want the final estimate aren't forced to handle the extra
+    diagnostics.
     """
     mouth = extract_mouth_motion_signal(video_path, sample_fps=sample_fps, scenes=scenes)
     if len(mouth.times_s) < 4:
@@ -177,5 +201,22 @@ def estimate_mouth_sync_offset(video_path: str, scenes: list[Interval] | None = 
     if len(a) < 4 or len(v) < 4:
         raise ValueError("Not enough overlapping signal within the given scenes to estimate offset.")
 
-    return estimate_offset_from_signals(_normalize(a), _normalize(v), rate_hz,
-                                         search_window_ms, in_sync_threshold_ms)
+    a_norm = _normalize(a)
+    v_norm = _normalize(v)
+    estimate = estimate_offset_from_signals(a_norm, v_norm, rate_hz, search_window_ms, in_sync_threshold_ms)
+    lags_ms, normalized_corr, _denom = _correlation_curve(a_norm, v_norm, rate_hz, search_window_ms)
+    return MouthSyncDiagnostics(estimate, lags_ms, normalized_corr, a_norm, rate_hz)
+
+
+def estimate_mouth_sync_offset(video_path: str, scenes: list[Interval] | None = None,
+                                sample_fps: float = 15.0, search_window_ms: float = 500.0,
+                                in_sync_threshold_ms: float = 40.0) -> OffsetEstimate:
+    """Cross-correlate mouth-region motion (restricted to `scenes` if given)
+    against the audio envelope. Same core estimator as
+    `coarse_xcorr.estimate_offset_from_signals`; the difference is entirely
+    in which visual signal it's fed and where it's allowed to look.
+    """
+    return estimate_mouth_sync_offset_with_diagnostics(
+        video_path, scenes=scenes, sample_fps=sample_fps,
+        search_window_ms=search_window_ms, in_sync_threshold_ms=in_sync_threshold_ms,
+    ).estimate

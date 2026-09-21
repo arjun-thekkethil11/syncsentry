@@ -35,22 +35,3 @@ jobs:
 
       - name: Run benchmark (smoke check that CLI + report generation works)
         run: syncsentry benchmark --out-dir /tmp/benchmark-results
-
-  test-orchestrator:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: services/orchestrator
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.22"
-
-      - name: Build
-        run: go build ./...
-
-      - name: Test
-        run: go test ./... -v

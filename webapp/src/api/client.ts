@@ -1,8 +1,7 @@
 import type { FixOptions, FixResponse } from "./types";
 
-// The analyzer's FastAPI server (analyzer/syncsentry/api.py), run separately
-// via `uvicorn syncsentry.api:app`. Overridable so a built/deployed webapp
-// can point at a non-localhost backend without a rebuild-time constant.
+// The analyzer's FastAPI server, run separately via
+// `uvicorn syncsentry.api:app`. Overridable via VITE_API_BASE_URL.
 export const API_BASE_URL: string =
   (import.meta.env.VITE_API_BASE_URL as string | undefined) ?? "http://localhost:8000";
 
@@ -24,10 +23,8 @@ export async function checkHealth(): Promise<boolean> {
 }
 
 /** Upload a video (or a .zip bundle) plus optional captions and run the
- * detect+fix pipeline. This is a single, synchronous HTTP call that can
- * take from ~1s (coarse detector) to several minutes (SyncNet on a long
- * clip) -- callers should show real progress messaging, not assume a fast
- * response, and pass an AbortSignal if they want a cancel button. */
+ * detect and fix pipeline. This is a single HTTP call that can take from
+ * about a second to several minutes depending on the detector used. */
 export async function runFix(
   video: File,
   captions: File | null,
@@ -56,7 +53,7 @@ export async function runFix(
       const body = await resp.json();
       if (body?.detail) detail = body.detail;
     } catch {
-      // response wasn't JSON -- keep the generic message
+      // response was not JSON, keep the generic message
     }
     throw new ApiError(detail, resp.status);
   }

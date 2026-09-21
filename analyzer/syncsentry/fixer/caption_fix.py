@@ -1,6 +1,6 @@
 """Apply a correction for detected caption-vs-speech drift.
 
-Unlike the A/V fix, this doesn't touch any media samples -- captions are
+Unlike the A/V fix, this doesn't touch any media samples: captions are
 just timestamped text, so "fixing" drift means rewriting every cue's start
 and end time by the detected offset. If captions start `offset_ms` *after*
 the speech they belong to (a positive offset per

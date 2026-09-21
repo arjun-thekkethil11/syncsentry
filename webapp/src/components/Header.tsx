@@ -42,7 +42,7 @@ export function Header() {
               status === "up" ? "bg-emerald-400" : status === "down" ? "bg-rose-400" : "bg-slate-500 animate-pulse"
             }`}
           />
-          {status === "up" ? "API connected" : status === "down" ? "API unreachable" : "Checking API…"}
+          {status === "up" ? "API connected" : status === "down" ? "API unreachable" : "Checking API..."}
         </div>
       </div>
     </header>

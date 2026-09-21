@@ -5,11 +5,9 @@ interface ProcessingViewProps {
   onCancel: () => void;
 }
 
-/** This is one blocking HTTP request under the hood (analyzer/syncsentry/api.py
- * runs the full detect->fix->verify pipeline synchronously), so there's no
- * real progress percentage to show. Rather than fabricate one, this shows
- * an honest elapsed-time counter plus what's actually happening at a
- * coarse-grained level, which is the truthful version of "progress" here. */
+/** The pipeline runs as one blocking request, so there is no real progress
+ * percentage. This shows an elapsed-time counter and the current stage
+ * instead of a fake progress bar. */
 export function ProcessingView({ useSyncnet, onCancel }: ProcessingViewProps) {
   const [elapsedS, setElapsedS] = useState(0);
 
@@ -20,12 +18,12 @@ export function ProcessingView({ useSyncnet, onCancel }: ProcessingViewProps) {
   }, []);
 
   const stage = !useSyncnet
-    ? "Extracting audio/video envelopes and cross-correlating…"
+    ? "Extracting audio and video signals..."
     : elapsedS < 15
-      ? "Extracting audio/video envelopes…"
+      ? "Extracting audio and video signals..."
       : elapsedS < 90
-        ? "Tracking faces & running SyncNet on active-speaker windows…"
-        : "Cross-corroborating windows and verifying the fix…";
+        ? "Tracking faces and running SyncNet..."
+        : "Verifying the fix...";
 
   return (
     <div className="rounded-xl border border-white/10 bg-white/[0.02] p-10 text-center">
@@ -40,13 +38,13 @@ export function ProcessingView({ useSyncnet, onCancel }: ProcessingViewProps) {
           />
         </svg>
       </div>
-      <p className="text-slate-200 font-medium mb-1">Processing…</p>
+      <p className="text-slate-200 font-medium mb-1">Processing...</p>
       <p className="text-sm text-slate-500 mb-6">{stage}</p>
       <p className="text-2xl font-mono tabular-nums text-brand-300 mb-1">
         {String(Math.floor(elapsedS / 60)).padStart(2, "0")}:{String(elapsedS % 60).padStart(2, "0")}
       </p>
       <p className="text-xs text-slate-600 mb-6">
-        {useSyncnet ? "SyncNet typically takes 1–5 minutes on CPU" : "usually a few seconds"}
+        {useSyncnet ? "Typically 30 to 120 seconds" : "Usually a few seconds"}
       </p>
       <button
         onClick={onCancel}

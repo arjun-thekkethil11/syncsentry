@@ -1,13 +1,13 @@
 """Coarse, model-free A/V sync offset detector.
 
 This is the "baseline" tier of SyncSentry's detection stack: a signal-
-processing approach analogous to the waveform-peak / frame-PTS heuristics
-used in production caption/VOD tooling today. It works on *any* content
-(no face required) but only detects a single global offset per clip/segment
--- it cannot, by itself, distinguish drift-early / drift-late / intermittent
-patterns the way the learned per-scene approach in DiVAS (CVPR 2024) does.
-That per-scene classification is implemented on top of this in
-`syncsentry.detectors.title_drift` (see docs/RESEARCH.md, Milestone 3).
+processing approach analogous to the waveform-peak/frame-PTS heuristics
+used in production caption/VOD tooling today. It works on any content (no
+face required) but only detects a single global offset per clip/segment;
+it cannot, by itself, distinguish drift-early/drift-late/intermittent
+patterns the way a learned per-scene approach can. That per-scene
+classification is implemented on top of this in
+`syncsentry.detectors.title_drift`.
 
 Method: extract an audio RMS envelope and a video brightness envelope,
 resample both to a common rate, normalize, and cross-correlate. The lag at
@@ -46,17 +46,18 @@ def _normalize(x: np.ndarray) -> np.ndarray:
     return x / std
 
 
-def estimate_offset_from_signals(a: np.ndarray, v: np.ndarray, rate_hz: float,
-                                  search_window_ms: float = 500.0,
-                                  in_sync_threshold_ms: float = 40.0) -> OffsetEstimate:
-    """Core cross-correlation estimator, operating on two already-uniform,
-    already-normalized 1-D arrays sampled at `rate_hz`.
-
-    Factored out of `estimate_av_offset` so callers that need many estimates
-    over one file (e.g. `syncsentry.lipsync.scene_offsets`, which slides a
-    window across a title) can extract the audio/video envelopes *once* and
-    reuse this function per-window, instead of re-running ffmpeg extraction
-    for every window.
+def _correlation_curve(a: np.ndarray, v: np.ndarray, rate_hz: float,
+                        search_window_ms: float) -> tuple[np.ndarray, np.ndarray, float]:
+    """Shared core of `estimate_offset_from_signals`: the full normalized
+    cross-correlation curve within the search window, as `(lags_ms,
+    normalized_corr, denom)`. Factored out so a caller that needs to
+    inspect the shape of the curve, not just its single tallest peak, can
+    do so without duplicating this arithmetic. Concretely,
+    `wide_range_offset.py`'s periodicity self-check needs to know whether
+    the top peak is uniquely tall or whether comparably-tall secondary
+    peaks exist at other lags (a signature of rhythm-driven aliasing),
+    information `estimate_offset_from_signals` below discards once it
+    picks the single best lag.
     """
     if len(a) < 2 or len(v) < 2:
         raise ValueError("Not enough signal to estimate offset.")
@@ -73,19 +74,36 @@ def estimate_offset_from_signals(a: np.ndarray, v: np.ndarray, rate_hz: float,
     window_corr = corr[lo:hi]
     window_lags = lags[lo:hi]
 
-    peak_idx = int(np.argmax(window_corr))
-    peak_lag_samples = window_lags[peak_idx]
-    peak_val = window_corr[peak_idx]
+    # Normalize by the theoretical max (||a|| * ||v||) at zero lag equivalent
+    # energy, giving a rough [0, 1]-ish correlation coefficient at every lag,
+    # not just the peak.
+    denom = float(np.sqrt(np.sum(a ** 2) * np.sum(v ** 2)))
+    normalized_corr = window_corr / denom if denom > 1e-9 else np.zeros_like(window_corr, dtype=float)
+    lags_ms = window_lags.astype(float) * (1000.0 / rate_hz)
+    return lags_ms, normalized_corr, denom
 
-    # Normalize confidence by the theoretical max (||a|| * ||v||) at zero lag
-    # equivalent energy, giving a rough [0, 1]-ish correlation coefficient.
-    denom = np.sqrt(np.sum(a ** 2) * np.sum(v ** 2))
-    confidence = float(peak_val / denom) if denom > 1e-9 else 0.0
+
+def estimate_offset_from_signals(a: np.ndarray, v: np.ndarray, rate_hz: float,
+                                  search_window_ms: float = 500.0,
+                                  in_sync_threshold_ms: float = 40.0) -> OffsetEstimate:
+    """Core cross-correlation estimator, operating on two already-uniform,
+    already-normalized 1-D arrays sampled at `rate_hz`.
+
+    Factored out of `estimate_av_offset` so callers that need many estimates
+    over one file (e.g. `syncsentry.lipsync.scene_offsets`, which slides a
+    window across a title) can extract the audio/video envelopes *once* and
+    reuse this function per-window, instead of re-running ffmpeg extraction
+    for every window.
+    """
+    lags_ms, normalized_corr, _denom = _correlation_curve(a, v, rate_hz, search_window_ms)
+
+    peak_idx = int(np.argmax(normalized_corr))
+    confidence = float(normalized_corr[peak_idx])
 
     # lag here is samples such that a[i] aligns with v[i - lag]; converting
     # to "audio relative to video" offset: positive lag means audio's
     # pattern appears *later* in index space than video's => audio lags.
-    offset_ms = float(peak_lag_samples) * (1000.0 / rate_hz)
+    offset_ms = float(lags_ms[peak_idx])
 
     if abs(offset_ms) <= in_sync_threshold_ms:
         direction = "in_sync"

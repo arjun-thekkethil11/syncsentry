@@ -1,8 +1,8 @@
 """Recovery-accuracy tests for the coarse A/V offset detector.
 
-Methodology mirrors the papers in docs/RESEARCH.md: inject a known offset
-into otherwise-clean synchronized material, run the detector, and assert
-the recovered offset is within tolerance of ground truth.
+Inject a known offset into otherwise-clean synchronized material, run the
+detector, and assert the recovered offset is within tolerance of ground
+truth.
 """
 import pytest
 
@@ -28,11 +28,10 @@ def test_recovers_injected_offset(tmp_path, injected_offset_ms):
 
 def test_periodic_ambiguity_boundary_is_documented(tmp_path):
     """Cross-correlating a periodic pulse train is only unambiguous up to
-    +/- period/2: a lag of +period/2 and -period/2 look identical. This test
-    pins down that known limitation (see docs/RESEARCH.md) so it can't
-    silently regress into something worse, and so nobody "fixes" the coarse
-    detector's default parameters without noticing why -500ms aliased on a
-    1s-period fixture in the first benchmark run.
+    +/- period/2: a lag of +period/2 and -period/2 look identical. Pins
+    down that known limitation so it can't silently regress, and so the
+    coarse detector's default parameters aren't changed without accounting
+    for why -500ms aliases on a 1s-period fixture.
     """
     period_s = 1.0
     spec = FixtureSpec(duration_s=8.0, period_s=period_s, pulse_ms=80, offset_ms=-500)
@@ -41,7 +40,7 @@ def test_periodic_ambiguity_boundary_is_documented(tmp_path):
     estimate = estimate_av_offset(str(video_path), search_window_ms=500.0)
 
     # At exactly the ambiguity boundary, the detector may lock onto either
-    # +500ms or -500ms -- both are "correct" under periodic aliasing.
+    # +500ms or -500ms: both are "correct" under periodic aliasing.
     assert abs(estimate.offset_ms) == pytest.approx(500.0, abs=TOLERANCE_MS)
 
 

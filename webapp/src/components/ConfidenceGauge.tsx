@@ -4,10 +4,8 @@ interface ConfidenceGaugeProps {
   size?: number;
 }
 
-/** Radial gauge showing detector confidence against the threshold actually
- * used to decide whether to trust it (see docs/RESEARCH.md) -- plotting
- * the raw confidence number alone would hide the one thing that matters:
- * whether it cleared the bar for "trust this enough to touch the file". */
+/** Radial gauge showing detector confidence against the threshold used
+ * to decide whether to trust it. */
 export function ConfidenceGauge({ confidence, threshold, size = 120 }: ConfidenceGaugeProps) {
   const radius = size / 2 - 10;
   const circumference = 2 * Math.PI * radius;
@@ -55,7 +53,7 @@ export function ConfidenceGauge({ confidence, threshold, size = 120 }: Confidenc
         </svg>
         <div className="absolute inset-0 flex flex-col items-center justify-center">
           <span className="text-lg font-semibold tabular-nums text-slate-100">
-            {confidence === null ? "—" : confidence.toFixed(2)}
+            {confidence === null ? "N/A" : confidence.toFixed(2)}
           </span>
           <span className="text-[10px] text-slate-500">confidence</span>
         </div>

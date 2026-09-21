@@ -1,10 +1,8 @@
 #!/usr/bin/env bash
-# Fetches a small, permissively-licensed real-world dialogue clip for local
-# validation of face detection + VAD (Milestone 3b). See
-# analyzer/fixtures/real_content/SOURCES.md for the license and why this
-# clip specifically. The output directory is gitignored -- third-party
-# video is never committed, even under a permissive license; only this
-# reproducible fetch script is.
+# Fetches a small, permissively-licensed real-world dialogue clip for
+# local validation of face detection and VAD. See
+# analyzer/fixtures/real_content/SOURCES.md for the license. The output
+# directory is gitignored; only this fetch script is committed.
 #
 # Usage:
 #   bash analyzer/scripts/fetch_real_content.sh

@@ -1,6 +1,6 @@
 """Round-trip tests for the fix modules: inject a known offset, apply the
-fix, and verify the *actual* residual measured by our own detectors is near
-zero -- not just that the fixer "ran without error."
+fix, and verify the actual residual measured by our own detectors is near
+zero, not just that the fixer ran without error.
 """
 import pytest
 

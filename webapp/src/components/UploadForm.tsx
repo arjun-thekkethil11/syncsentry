@@ -7,8 +7,11 @@ interface UploadFormProps {
   disabled?: boolean;
 }
 
+// SyncNet is more accurate on real talking-head content, so it is on
+// by default. The plain cross-correlation detector is faster but less
+// reliable, so it is opt-out rather than the default.
 const DEFAULT_OPTIONS: FixOptions = {
-  useSyncnet: false,
+  useSyncnet: true,
   avMinConfidence: 0.3,
   syncnetMinConfidence: 3.0,
 };
@@ -32,7 +35,7 @@ export function UploadForm({ onSubmit, disabled }: UploadFormProps) {
     >
       <FileDrop
         label="Video (or a .zip bundle)"
-        hint="MP4, MKV, MOV, WebM… or a .zip containing the video (+ optional captions)"
+        hint="MP4, MKV, MOV, WebM, or a .zip containing the video and optional captions"
         accept="video/*,.zip,.mkv"
         file={video}
         onChange={setVideo}
@@ -40,8 +43,8 @@ export function UploadForm({ onSubmit, disabled }: UploadFormProps) {
 
       {isZip && (
         <p className="text-xs text-brand-300 bg-brand-500/10 border border-brand-500/20 rounded-lg px-3 py-2">
-          Zip detected — SyncSentry will extract it server-side and look for a video (+ optional
-          captions) inside automatically.
+          Zip detected. SyncSentry will extract it and look for a video and optional captions
+          inside.
         </p>
       )}
 
@@ -66,12 +69,11 @@ export function UploadForm({ onSubmit, disabled }: UploadFormProps) {
           />
           <span>
             <span className="block text-sm font-medium text-slate-200">
-              Use SyncNet (pretrained lip-sync model)
+              Use SyncNet lip-motion analysis
             </span>
             <span className="block text-xs text-slate-500 mt-0.5">
-              Far more accurate on real talking-head/dialogue content than the default detector.
-              Takes ~1–5 minutes per video on CPU instead of seconds — worth it when you need a
-              trustworthy answer, not a fast guess.
+              More accurate on talking-head video, slower (30 to 120 seconds). Uncheck for a
+              faster, less reliable estimate.
             </span>
           </span>
         </label>
@@ -81,7 +83,7 @@ export function UploadForm({ onSubmit, disabled }: UploadFormProps) {
           onClick={() => setAdvancedOpen((v) => !v)}
           className="mt-3 text-xs text-slate-500 hover:text-slate-300 transition-colors"
         >
-          {advancedOpen ? "− Hide advanced options" : "+ Advanced options (confidence thresholds)"}
+          {advancedOpen ? "Hide advanced options" : "Advanced options"}
         </button>
 
         {advancedOpen && (
@@ -118,8 +120,7 @@ export function UploadForm({ onSubmit, disabled }: UploadFormProps) {
               />
             </label>
             <p className="text-[11px] text-slate-500 sm:col-span-2">
-              Lower thresholds trust weaker signal (more offsets get "fixed" automatically, more
-              risk of a false positive). Raise them to be more conservative.
+              Lower thresholds fix more offsets automatically but risk more false positives.
             </p>
           </div>
         )}
@@ -130,7 +131,7 @@ export function UploadForm({ onSubmit, disabled }: UploadFormProps) {
         disabled={!canSubmit}
         className="w-full rounded-lg bg-brand-500 hover:bg-brand-400 disabled:bg-slate-700 disabled:text-slate-500 disabled:cursor-not-allowed text-white font-medium py-3 transition-colors"
       >
-        {disabled ? "Processing…" : "Detect & fix sync issues"}
+        {disabled ? "Processing..." : "Detect and fix sync issues"}
       </button>
     </form>
   );

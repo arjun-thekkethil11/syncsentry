@@ -5,20 +5,20 @@ via RANSAC, then use the line's slope/intercept plus the outlier structure to
 tell apart the four failure modes that a single global-offset number can't
 distinguish:
 
-  * in_sync           -- flat line near zero
-  * constant_offset   -- flat line, away from zero
-  * drift_increasing  -- offset grows steadily over the title (e.g. a
-                          progressive clock-rate mismatch)
-  * drift_decreasing  -- offset shrinks/goes negative steadily
-  * intermittent      -- most of the title fits a flat line, but a
-                          *contiguous* block of scenes sits well off that
-                          line (e.g. one badly-spliced segment)
-  * unstable          -- no line fits most of the scenes; per-scene
-                          estimates disagree too much to classify with
-                          confidence (report the raw per-scene data instead
-                          of guessing)
+  * in_sync:          flat line near zero
+  * constant_offset:  flat line, away from zero
+  * drift_increasing: offset grows steadily over the title (e.g. a
+                       progressive clock-rate mismatch)
+  * drift_decreasing: offset shrinks/goes negative steadily
+  * intermittent:     most of the title fits a flat line, but a
+                       contiguous block of scenes sits well off that
+                       line (e.g. one badly-spliced segment)
+  * unstable:         no line fits most of the scenes; per-scene
+                       estimates disagree too much to classify with
+                       confidence (report the raw per-scene data instead
+                       of guessing)
 
-This module only depends on numpy (no scikit-learn) -- RANSAC for a 1-D line
+This module only depends on numpy (no scikit-learn): RANSAC for a 1-D line
 fit is simple enough not to need a dependency for it.
 """
 from __future__ import annotations

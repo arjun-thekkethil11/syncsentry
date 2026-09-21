@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "syncsentry"
 version = "0.1.0"
-description = "Research-grounded A/V and caption synchronization drift detection for OTT pipelines"
+description = "Detects and fixes audio/video sync drift using lip motion and speech"
 requires-python = ">=3.11"
 
 [project.scripts]

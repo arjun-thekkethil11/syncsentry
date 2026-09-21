@@ -27,8 +27,7 @@ body {
   background-color: rgba(56, 102, 240, 0.35);
 }
 
-/* Small, tasteful custom scrollbar -- default browser scrollbars look out
-   of place against the dark, glassy panels used throughout the app. */
+/* Custom scrollbar to match the dark theme. */
 ::-webkit-scrollbar {
   width: 10px;
   height: 10px;
