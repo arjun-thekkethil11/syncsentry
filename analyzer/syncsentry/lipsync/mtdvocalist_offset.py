@@ -87,9 +87,8 @@ def is_available() -> bool:
 def _check_available() -> None:
     if not is_available():
         raise MTDVocaLiSTUnavailable(
-            f"MTDVocaLiST not found at {_MTDVOCALIST_DIR}. Run "
-            f"`bash analyzer/scripts/fetch_mtdvocalist.sh` once to fetch it. "
-            f"Never committed to this repo, see analyzer/third_party/SOURCES.md."
+            "MTDVocaLiST is not installed on this server. Run "
+            "`bash analyzer/scripts/fetch_mtdvocalist.sh` to fetch it."
         )
 
 

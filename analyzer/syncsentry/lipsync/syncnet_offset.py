@@ -157,10 +157,9 @@ def is_available() -> bool:
 def _check_available() -> None:
     if not is_available():
         raise SyncNetUnavailable(
-            f"SyncNet not found at {_SYNCNET_DIR}. Run "
-            f"`bash analyzer/scripts/fetch_syncnet.sh` once to fetch the "
-            f"(MIT-licensed) reference implementation and pretrained weights. "
-            f"Never committed to this repo, see analyzer/third_party/SOURCES.md."
+            "SyncNet is not installed on this server. Run "
+            "`bash analyzer/scripts/fetch_syncnet.sh` to fetch the "
+            "(MIT-licensed) reference implementation and pretrained weights."
         )
 
 

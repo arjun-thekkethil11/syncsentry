@@ -58,10 +58,9 @@ def is_available() -> bool:
 def _check_available() -> None:
     if not is_available():
         raise ActiveSpeakerUnavailable(
-            f"Light-ASD not found at {_LIGHT_ASD_DIR}. Run "
-            f"`bash analyzer/scripts/fetch_light_asd.sh` once to fetch the "
-            f"(MIT-licensed) reference implementation and pretrained weights. "
-            f"Never committed to this repo, see analyzer/third_party/SOURCES.md."
+            "Light-ASD is not installed on this server. Run "
+            "`bash analyzer/scripts/fetch_light_asd.sh` to fetch the "
+            "(MIT-licensed) reference implementation and pretrained weights."
         )
 
 

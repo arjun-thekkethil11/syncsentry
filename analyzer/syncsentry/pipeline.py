@@ -474,8 +474,8 @@ def _fix_single_global_offset(video_path: Path, corrected_video_path: Path, av_t
         # talking-head content, where the confidence signal is weaker.
         corrected_video_path.write_bytes(video_path.read_bytes())
         note = (f"low-confidence detection{method_tag}: raw estimate {det.offset_ms:+.0f}ms "
-                f"({det.direction}), confidence {det.confidence:.2f} (threshold {det.min_confidence:.2f}) "
-                f"-- too low to trust; not applied automatically. If your own check agrees with the "
+                f"({det.direction}), confidence {det.confidence:.2f} (threshold {det.min_confidence:.2f}), "
+                f"too low to trust; not applied automatically. If your own check agrees with the "
                 f"direction, re-run with a lower confidence threshold to force it, but treat the "
                 f"result as unverified")
         if det.fallback_note:
