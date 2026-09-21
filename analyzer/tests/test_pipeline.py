@@ -208,7 +208,8 @@ def test_pipeline_uses_piecewise_result_when_available(tmp_path, monkeypatch):
                                         {"start_s": 4.0, "end_s": 8.0, "offset_ms": -500.0, "status": "trusted"}],
     )
 
-    def fake_maybe_fix_piecewise(video_path, corrected_video_path, av_threshold_ms, syncnet_min_confidence):
+    def fake_maybe_fix_piecewise(video_path, corrected_video_path, av_threshold_ms,
+                                  av_min_confidence, syncnet_min_confidence):
         Path(corrected_video_path).write_bytes(Path(video_path).read_bytes())
         return canned
 
@@ -230,6 +231,111 @@ def test_pipeline_uses_piecewise_result_when_available(tmp_path, monkeypatch):
     assert av_issue.segments == canned.segments
     assert (tmp_path / "out" / "report.json").exists()
     assert "piecewise" in (tmp_path / "out" / "report.txt").read_text()
+
+
+def test_maybe_fix_piecewise_backs_out_when_confirmed_segments_agree(tmp_path, monkeypatch):
+    """Regression test for a real failure mode: the classical pre-check
+    can flag multiple candidate regions as "disagreeing" purely from its
+    own noise, even on a clip with one real, constant offset for its
+    whole duration (measured directly on `dialogue_full50s__n500ms` in
+    the blind benchmark). If SyncNet refinement then confirms several of
+    those candidates and they all actually agree with each other, that
+    agreement is the real signal, not the classical pre-check's
+    "multiple regions" claim. The piecewise path must apply the
+    agreed-on value as one global correction (and report `method`
+    accordingly) instead of a partial, lower-quality per-region
+    "piecewise" result.
+    """
+    import syncsentry.pipeline as pipeline_mod
+    from syncsentry.lipsync.piecewise_offset import OffsetSegment, PiecewiseResult
+
+    noisy_pre_check_segments = [
+        OffsetSegment(0.0, 10.0, 40.0, 3.0, "trusted"),
+        OffsetSegment(10.0, 20.0, 1880.0, 3.0, "trusted"),
+        OffsetSegment(20.0, 30.0, 600.0, 3.0, "trusted"),
+    ]
+
+    def fake_detect_piecewise_offsets(video_path):
+        return PiecewiseResult(is_piecewise=True, segments=noisy_pre_check_segments,
+                                video_duration_s=30.0, n_chunks_evaluated=3, n_chunks_confident=3)
+
+    def fake_refine(video_path, segments, min_confidence=None):
+        # SyncNet refinement overrides the noisy classical numbers with
+        # its own; all three happen to agree on the same real offset.
+        return [
+            OffsetSegment(0.0, 10.0, -510.0, 8.0, "trusted"),
+            OffsetSegment(10.0, 20.0, -495.0, 8.0, "trusted"),
+            OffsetSegment(20.0, 30.0, -505.0, 8.0, "trusted"),
+        ]
+
+    fix_calls = []
+
+    def fake_fix_av_offset(video_path, out_path, offset_ms, **kwargs):
+        fix_calls.append(offset_ms)
+        Path(out_path).write_bytes(b"corrected")
+
+    def fake_detect_av_offset(video_path, av_threshold_ms, use_syncnet, syncnet_min_confidence,
+                               av_min_confidence, use_mtdvocalist=False, recenter_large_offsets=True,
+                               max_analyze_duration_s=None):
+        return pipeline_mod._AVDetection(0.0, 8.0, "in_sync", 0.3, "syncnet", None)
+
+    monkeypatch.setattr("syncsentry.lipsync.piecewise_offset.detect_piecewise_offsets",
+                         fake_detect_piecewise_offsets)
+    monkeypatch.setattr("syncsentry.lipsync.piecewise_offset.refine_piecewise_segments_with_syncnet",
+                         fake_refine)
+    monkeypatch.setattr(pipeline_mod, "fix_av_offset", fake_fix_av_offset)
+    monkeypatch.setattr(pipeline_mod, "_detect_av_offset", fake_detect_av_offset)
+
+    result = pipeline_mod._maybe_fix_piecewise(
+        "input.mp4", tmp_path / "out.mp4", av_threshold_ms=50.0,
+        av_min_confidence=0.3, syncnet_min_confidence=6.0,
+    )
+
+    assert result is not None
+    assert result.method == "syncnet"  # not "piecewise": treated as one global offset
+    assert result.status == "fixed"
+    assert fix_calls == [pytest.approx(-505.0)]  # median of -510, -495, -505
+
+
+def test_maybe_fix_piecewise_keeps_piecewise_path_when_segments_genuinely_disagree(tmp_path, monkeypatch):
+    """Counterpart to the test above: when confirmed segments' offsets
+    genuinely differ (not just classical pre-check noise), the piecewise
+    path must still be taken, not backed out to a single global fix."""
+    import syncsentry.pipeline as pipeline_mod
+    from syncsentry.lipsync.piecewise_offset import OffsetSegment, PiecewiseResult
+
+    pre_check_segments = [
+        OffsetSegment(0.0, 10.0, 300.0, 3.0, "trusted"),
+        OffsetSegment(10.0, 20.0, -500.0, 3.0, "trusted"),
+    ]
+
+    def fake_detect_piecewise_offsets(video_path):
+        return PiecewiseResult(is_piecewise=True, segments=pre_check_segments,
+                                video_duration_s=20.0, n_chunks_evaluated=2, n_chunks_confident=2)
+
+    def fake_refine(video_path, segments, min_confidence=None):
+        return [
+            OffsetSegment(0.0, 10.0, 310.0, 8.0, "trusted"),
+            OffsetSegment(10.0, 20.0, -505.0, 8.0, "trusted"),
+        ]
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("single-global fix_av_offset must not run on genuinely piecewise content")
+
+    monkeypatch.setattr("syncsentry.lipsync.piecewise_offset.detect_piecewise_offsets",
+                         fake_detect_piecewise_offsets)
+    monkeypatch.setattr("syncsentry.lipsync.piecewise_offset.refine_piecewise_segments_with_syncnet",
+                         fake_refine)
+    monkeypatch.setattr(pipeline_mod, "fix_av_offset", fail_if_called)
+    monkeypatch.setattr("syncsentry.fixer.piecewise_fix.fix_piecewise_offsets", lambda *a, **k: None)
+
+    result = pipeline_mod._maybe_fix_piecewise(
+        "input.mp4", tmp_path / "out.mp4", av_threshold_ms=50.0,
+        av_min_confidence=0.3, syncnet_min_confidence=6.0,
+    )
+
+    assert result is not None
+    assert result.method == "piecewise"
 
 
 def test_undetermined_duration_fraction_computes_correctly():

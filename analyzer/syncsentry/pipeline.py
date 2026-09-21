@@ -25,6 +25,7 @@ work.
 """
 from __future__ import annotations
 
+import statistics
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -92,21 +93,37 @@ RESIDUAL_VERIFY_MAX_ANALYZE_DURATION_S = None
 # taking the separate piecewise report/fix path over the normal
 # single-global-offset one.
 #
-# 1, not 2: the classical pre-check (`piecewise_offset.
-# MIN_SEGMENTS_FOR_PIECEWISE`) already independently requires >= 2
-# mutually-disagreeing trusted regions before calling a clip "piecewise"
-# at all, so that structural evidence exists by the time SyncNet
-# refinement runs. Refinement's job is to confirm or correct each
-# candidate's value (or abstain), not to re-decide whether the clip is
-# piecewise, so refinement confirming only one candidate as trusted and
-# worth fixing is still a real, verified fix. Requiring a second
-# confirmed region would discard that fix and fall back to applying one
-# single-global number to the entire clip, which is worse: guessing on
-# the whole timeline is not safer than confidently fixing the one region
-# with real evidence and leaving the rest honestly "undetermined" (see
-# `_maybe_fix_piecewise`'s per-segment status reporting: an undetermined
-# region is never silently reported as fixed).
+# The classical pre-check (`piecewise_offset.MIN_SEGMENTS_FOR_PIECEWISE`)
+# requires >= 2 mutually-disagreeing candidate regions before calling a
+# clip "piecewise" at all, but that pre-check runs on noisy classical
+# cross-correlation: measured directly (see `dialogue_full50s__n500ms`
+# in the blind benchmark, a clip with one real, constant -500ms offset
+# for its whole duration), it can still report multiple "disagreeing"
+# candidates purely from per-chunk noise, not genuine structure. SyncNet
+# refinement confirming one of those candidates as trusted does not by
+# itself rule that out: the confirmed segment's offset could just be
+# this clip's one real global value, sampled in the one window that
+# happened to have strong evidence. `PIECEWISE_AGREEMENT_TOLERANCE_MS`
+# below is the actual check for that; this constant alone is not enough.
 MIN_FIXED_SEGMENTS_FOR_PIECEWISE_PATH = 1
+
+# If every confirmed ("trusted") segment's offset agrees with every
+# other confirmed segment's within this many ms, the clip is treated as
+# having one real global offset rather than genuine per-region
+# structure, and `_maybe_fix_piecewise` backs out (returns `None`) to
+# let the normal single-global path handle it instead, cheaper (one
+# whole-clip detect/fix/verify instead of N segments' worth) and more
+# complete (the single-global path either confidently fixes the whole
+# duration or honestly abstains, instead of piecewise's partial,
+# per-region "some regions undetermined" report). This is the actual
+# gate against the noisy-classical-pre-check failure mode described
+# above; requiring >= 2 confirmed segments alone would not catch it,
+# since two independently-sampled windows of the same real global
+# offset routinely both confirm correctly and still "agree" with each
+# other. 150ms, not tighter: SyncNet's own frame quantization (40ms at
+# 25fps) plus real per-window noise means even two readings of a truly
+# identical offset rarely land bit-for-bit on the same ms value.
+PIECEWISE_AGREEMENT_TOLERANCE_MS = 150.0
 
 # If more than this fraction of the video's own duration ends up
 # "undetermined" after refinement, the overall issue is reported
@@ -216,7 +233,7 @@ def _detect_av_offset(video_path: str, av_threshold_ms: float, use_syncnet: bool
 
 
 def _maybe_fix_piecewise(video_path: str, corrected_video_path: Path, av_threshold_ms: float,
-                          syncnet_min_confidence: float) -> IssueSummary | None:
+                          av_min_confidence: float, syncnet_min_confidence: float) -> IssueSummary | None:
     """Attempts the piecewise (independent per-region) A/V sync path.
 
     See `syncsentry.lipsync.piecewise_offset`'s module docstring for why
@@ -263,6 +280,47 @@ def _maybe_fix_piecewise(video_path: str, corrected_video_path: Path, av_thresho
         # reporting a piecewise result with little or nothing to show
         # for it.
         return None
+
+    # Every confirmed segment agreeing with every other one (see
+    # `PIECEWISE_AGREEMENT_TOLERANCE_MS` above) means the classical
+    # pre-check's "these regions disagree" signal was noise, not real
+    # structure: this clip has one real global offset, just sampled
+    # correctly in more than one window.
+    #
+    # Apply that already-confirmed value directly rather than discarding
+    # it and telling the caller to fall back to
+    # `_fix_single_global_offset`, which would re-run a full, fresh
+    # whole-clip SyncNet detection pass to very likely reconfirm the same
+    # number this refinement pass just spent real time establishing.
+    # Still pays for one honest post-fix verification pass (never skip
+    # that, see module docstring), just not a second detection pass on
+    # top of it.
+    fixable_offsets = [s.offset_ms for s in fixable]
+    if max(fixable_offsets) - min(fixable_offsets) <= PIECEWISE_AGREEMENT_TOLERANCE_MS:
+        confirmed_offset_ms = statistics.median(fixable_offsets)
+        fix_av_offset(video_path, corrected_video_path, confirmed_offset_ms)
+        residual_det = _detect_av_offset(str(corrected_video_path), av_threshold_ms, use_syncnet=True,
+                                          syncnet_min_confidence=syncnet_min_confidence,
+                                          av_min_confidence=av_min_confidence,
+                                          recenter_large_offsets=False,
+                                          max_analyze_duration_s=RESIDUAL_VERIFY_MAX_ANALYZE_DURATION_S)
+        residual_confident = residual_det.confidence >= residual_det.min_confidence
+        fixed = residual_confident and abs(residual_det.offset_ms) <= av_threshold_ms
+        note = (f"initially looked like it might have multiple independently-offset regions, but the "
+                f"{len(fixable)} confirmed region(s) agreed on one offset ({confirmed_offset_ms:+.0f}ms), "
+                f"so this was treated as one global correction instead of a partial per-region fix")
+        if not residual_confident:
+            note += (f"; residual re-check was itself low-confidence ({residual_det.confidence:.2f} < "
+                     f"{residual_det.min_confidence:.2f}), so the fix could not be independently confirmed")
+        elif not fixed:
+            note += (f"; residual re-check confidently found a remaining {residual_det.offset_ms:+.0f}ms "
+                     f"offset after the applied correction")
+        return IssueSummary(
+            name="A/V sync", had_issue=True, detected_offset_ms=confirmed_offset_ms, fixed=fixed,
+            residual_offset_ms=(residual_det.offset_ms if residual_confident else None), note=note,
+            status=("fixed" if fixed else "not_fixed"), confidence=residual_det.confidence,
+            min_confidence=residual_det.min_confidence, method="syncnet",
+        )
 
     fix_piecewise_offsets(video_path, corrected_video_path, refined)
 
@@ -394,7 +452,7 @@ def run_fix_pipeline(video_path: str | Path, out_dir: str | Path,
     piecewise_issue = None
     if use_syncnet and syncnet_is_available():
         piecewise_issue = _maybe_fix_piecewise(str(video_path), corrected_video_path,
-                                                av_threshold_ms, syncnet_min_confidence)
+                                                av_threshold_ms, av_min_confidence, syncnet_min_confidence)
 
     if piecewise_issue is not None:
         summary.issues.append(piecewise_issue)
