@@ -248,7 +248,13 @@ def fix(video: UploadFile = File(...), captions: UploadFile | None = File(None),
     result["input_filename"] = video_path.name
     result["input_duration_s"] = input_duration_s
     result["processing_time_s"] = round(processing_time_s, 2)
-    result["used_syncnet"] = use_syncnet
+    # Whether a learned lip-motion model actually ran, not just whether
+    # the caller asked for it: `use_syncnet=True` on a server without the
+    # weights installed silently falls back to the coarse detector (see
+    # `run_fix_pipeline`'s own gate), and reporting the raw request flag
+    # here would then claim the learned analysis ran when it didn't.
+    learned_methods = {"syncnet", "mtdvocalist", "piecewise"}
+    result["used_syncnet"] = any(issue.get("method") in learned_methods for issue in result["issues"])
     result["download_urls"] = {
         label: f"/v1/jobs/{job_id}/files/{Path(path).name}"
         for label, path in summary.output_files.items()
