@@ -66,6 +66,16 @@ bash analyzer/scripts/fetch_real_content.sh
 bash analyzer/scripts/fetch_syncnet.sh
 ```
 
+## Deploying
+
+`render.yaml` deploys both services on Render as a Blueprint. If you set the static
+site up manually instead, add a rewrite rule (Settings > Redirects/Rewrites) so
+client-side routes don't 404 on direct load or refresh:
+
+| Source | Destination | Action  |
+|--------|-------------|---------|
+| `/*`   | `/index.html` | Rewrite |
+
 ## Benchmark
 
 ```bash
