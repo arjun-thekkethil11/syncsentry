@@ -15,7 +15,12 @@ export class ApiError extends Error {
 
 export async function checkHealth(): Promise<boolean> {
   try {
-    const resp = await fetch(`${API_BASE_URL}/healthz`, { signal: AbortSignal.timeout(4000) });
+    // 12s, not a couple seconds: free-tier hosting (e.g. Render) can spin
+    // down an idle backend and take up to a minute to wake it back up on
+    // the next request. A short timeout here would misreport a slow but
+    // healthy cold start as "unreachable". Kept below the 15s poll
+    // interval in useApiHealth so checks don't overlap.
+    const resp = await fetch(`${API_BASE_URL}/healthz`, { signal: AbortSignal.timeout(12000) });
     return resp.ok;
   } catch {
     return false;
