@@ -37,6 +37,7 @@ from syncsentry.lipsync.syncnet_offset import (
     DEFAULT_SYNCNET_MIN_CONFIDENCE,
     SyncNetUnavailable,
     estimate_syncnet_offset,
+    is_available as syncnet_is_available,
 )
 from syncsentry.report.summary import IssueSummary, SyncFixSummary
 
@@ -365,16 +366,23 @@ def run_fix_pipeline(video_path: str | Path, out_dir: str | Path,
     corrected_video_path = out_dir / f"{video_path.stem}.corrected{video_path.suffix}"
 
     # --- Step 0: piecewise pre-check ---
-    # Only attempted with SyncNet enabled: the classical pre-check alone
-    # is not reliable enough to apply a correction from directly (see
-    # `piecewise_offset.py`'s own docstring), and this path exists to add
-    # a capability the SyncNet-based path doesn't have, not to replace
-    # it. Deliberately conservative (see `_maybe_fix_piecewise`'s
-    # docstring for every gate involved): returns `None`, falling through
-    # to the unchanged single-global-offset path below, for the
-    # overwhelming common case of single-source content.
+    # Only attempted with SyncNet both requested and actually installed:
+    # the classical pre-check alone is not reliable enough to apply a
+    # correction from directly (see `piecewise_offset.py`'s own
+    # docstring), and refinement needs SyncNet itself. Checking
+    # `syncnet_is_available()` here, not just `use_syncnet`, matters on
+    # deployments where SyncNet's weights were never fetched: without it,
+    # this branch would still pay for a real face-detection and
+    # speech-detection scan of the whole video (dialogue-scene
+    # localization) only to discover at the refinement step that SyncNet
+    # isn't there, wasting real time on CPU-constrained hosts for no
+    # possible benefit. Deliberately conservative otherwise (see
+    # `_maybe_fix_piecewise`'s docstring for every other gate involved):
+    # returns `None`, falling through to the unchanged single-global-offset
+    # path below, for the overwhelming common case of single-source
+    # content.
     piecewise_issue = None
-    if use_syncnet:
+    if use_syncnet and syncnet_is_available():
         piecewise_issue = _maybe_fix_piecewise(str(video_path), corrected_video_path,
                                                 av_threshold_ms, syncnet_min_confidence)
 
