@@ -3,8 +3,10 @@
 # the learned lip-sync estimator used by --use-syncnet.
 #
 # Vendors joonson/syncnet_python (MIT-licensed code) into
-# analyzer/third_party/syncnet_python/, and downloads its two pretrained
-# model files (SyncNet itself and the S3FD face detector it depends on)
+# analyzer/third_party/syncnet_python/ by downloading a source tarball
+# (rather than git clone, which some build environments disable), and
+# downloads its two pretrained model files (SyncNet itself and the S3FD
+# face detector it depends on)
 # from a Hugging Face mirror, since the original robotics.ox.ac.uk host
 # has an expired TLS cert as of this writing. See
 # analyzer/third_party/SOURCES.md for provenance and license notes.
@@ -20,10 +22,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEST="$SCRIPT_DIR/../third_party/syncnet_python"
 
 if [ ! -d "$DEST" ]; then
-  echo "Cloning joonson/syncnet_python (MIT) ..."
-  git clone --depth 1 https://github.com/joonson/syncnet_python.git "$DEST"
+  echo "Downloading joonson/syncnet_python (MIT) ..."
+  TARBALL="$(mktemp)"
+  curl -fL -o "$TARBALL" "https://github.com/joonson/syncnet_python/archive/refs/heads/master.tar.gz"
+  mkdir -p "$DEST"
+  tar -xzf "$TARBALL" -C "$DEST" --strip-components=1
+  rm -f "$TARBALL"
 else
-  echo "syncnet_python already cloned, skipping."
+  echo "syncnet_python already present, skipping."
 fi
 
 mkdir -p "$DEST/data" "$DEST/detectors/s3fd/weights"
