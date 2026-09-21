@@ -120,7 +120,14 @@ def fix_piecewise_offsets(video_path: str | Path, out_path: str | Path, segments
         ffmpeg, "-y", "-loglevel", "error", "-i", video_path,
         "-filter_complex", filter_complex,
         "-map", "0:v", "-map", "[aout]",
-        "-c:v", "copy", "-c:a", "pcm_s16le",
+        # AAC, not pcm_s16le: the concat filter graph forces a full audio
+        # decode and re-encode regardless of codec, so there's no
+        # bit-exact PCM to preserve, and ffmpeg's mp4 muxer has no tag for
+        # raw PCM at all (works in .mkv, which is why this never surfaced
+        # against the synthetic test fixtures, but fails outright on a
+        # real .mp4 upload). AAC muxes cleanly into every container this
+        # pipeline actually receives.
+        "-c:v", "copy", "-c:a", "aac", "-b:a", "192k",
     ]
     if video_duration_s is not None:
         # Same +0.05s safety margin as `fix_av_offset` (see that module's

@@ -91,7 +91,15 @@ def fix_av_offset(video_path: str | Path, out_path: str | Path, offset_ms: float
         ffmpeg, "-y", "-loglevel", "error",
         "-i", video_path,
         "-c:v", "copy",
-        "-af", audio_filter, "-c:a", "pcm_s16le",
+        # AAC, not pcm_s16le: the audio filter forces a full decode and
+        # re-encode regardless of codec, so there is no bit-exact PCM to
+        # preserve here anyway, and AAC is the one audio codec that muxes
+        # cleanly into every container this pipeline actually receives.
+        # Raw PCM works fine in .mkv (why this never surfaced against the
+        # synthetic .mkv test fixtures) but ffmpeg's mp4 muxer has no tag
+        # for it at all and fails outright on real .mp4 uploads, the
+        # overwhelmingly common real-world case.
+        "-af", audio_filter, "-c:a", "aac", "-b:a", "192k",
     ]
     if video_duration_s is not None:
         # +0.05s safety margin: `-t` bounds the *whole* output (video
