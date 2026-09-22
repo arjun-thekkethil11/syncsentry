@@ -639,15 +639,22 @@ def refine_piecewise_segments_with_syncnet(video_path: str, segments: list[Offse
 MAX_REFINE_WORKERS = int(os.environ.get("SYNCSENTRY_MAX_REFINE_WORKERS", "4"))
 
 # Environment variables read by the BLAS/OpenMP libraries underneath
-# torch's CPU backend (checked at each subprocess's own startup, not
-# settable via `torch.set_num_threads()` from this parent process, since
-# each refinement call's face-detection stage is its own separate OS
-# process, not a thread in this one; see
-# `syncnet_offset._run_face_track_crop`). Divided across concurrent
-# workers below so N simultaneous `run_pipeline.py` subprocesses share
-# this machine's cores instead of each independently trying to claim all
-# of them: uncapped, concurrent S3FD subprocesses thrash each other for
-# cache/cores badly enough to erase most of the concurrency win.
+# torch's CPU backend. Divided across concurrent workers below so N
+# concurrent refinement calls share this machine's cores instead of each
+# independently trying to claim all of them: uncapped, concurrent S3FD +
+# SyncNet calls thrash each other for cache/cores badly enough to erase
+# most of the concurrency win.
+#
+# `run_pipeline.py`'s face-detection stage runs in-process now (see
+# `syncnet_offset._run_face_track_crop`), not as its own subprocess, so
+# these env vars alone are not enough: most BLAS/OpenMP backends only
+# read them once, at that library's first init in this process, not on
+# every call, so mutating them here has no effect on a torch/numpy
+# already loaded before this function ever runs (which, by the time any
+# refinement happens, it always has been). `torch.set_num_threads()`
+# below is the part that actually takes effect at runtime; the env vars
+# are kept too as a no-cost fallback for any other BLAS consumer in this
+# process that does re-read them per-call.
 _THREAD_BUDGET_ENV_VARS = (
     "OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
     "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS",
@@ -733,6 +740,9 @@ def _refine_segments_concurrently(video_path: str, segments: list[OffsetSegment]
     saved_env = {k: os.environ.get(k) for k in _THREAD_BUDGET_ENV_VARS}
     for k in _THREAD_BUDGET_ENV_VARS:
         os.environ[k] = str(threads_per_worker)
+    import torch
+    saved_torch_threads = torch.get_num_threads()
+    torch.set_num_threads(threads_per_worker)
     try:
         results: dict[int, OffsetSegment] = {}
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
@@ -754,3 +764,4 @@ def _refine_segments_concurrently(video_path: str, segments: list[OffsetSegment]
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+        torch.set_num_threads(saved_torch_threads)

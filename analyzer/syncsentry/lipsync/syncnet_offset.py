@@ -11,8 +11,9 @@ weights (`analyzer/third_party/SOURCES.md`).
 
 Two real stages, no shortcuts:
   1. Face detection + tracking + 224x224 mouth-centered crop (S3FD,
-     `run_pipeline.py`, run as a subprocess since it's a standalone script
-     with module-level side effects, not an importable library).
+     `run_pipeline.py`, imported and run in-process; see
+     `_get_run_pipeline_module`/`_run_face_track_crop` for why this
+     matters for memory, not just simplicity).
   2. SyncNet embedding + sliding-window L2-distance offset search on each
      cropped face track (`SyncNetInstance`, imported directly so we get
      real (offset, confidence) values, not log text to parse).
@@ -35,6 +36,8 @@ import subprocess
 import sys
 import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as _FutureTimeoutError
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -433,32 +436,101 @@ def _adaptive_min_track(video_path: str, frame_rate: float = 25.0) -> int:
     return max(20, min(100, int(n_frames * 0.25)))
 
 
+_run_pipeline_module = None
+_run_pipeline_import_lock = threading.Lock()
+
+
+def _get_run_pipeline_module():
+    """Imports the vendored `run_pipeline.py` once per process and caches
+    it. It used to be run only as a subprocess (its arg-parsing lived at
+    module scope, so it couldn't be imported at all); `fetch_syncnet.sh`
+    now patches it to expose `run_face_track_pipeline(opt)` as a plain
+    function while leaving its CLI entry point behavior unchanged.
+
+    Guarded by a lock only around the one-time import: `sys.modules`
+    itself is thread-safe, but inserting/removing `_SYNCNET_DIR` on
+    `sys.path` around that first import is not, so two threads racing to
+    import this for the first time (piecewise refinement's
+    `ThreadPoolExecutor`, see `piecewise_offset.py`) could otherwise
+    interleave those mutations.
+    """
+    global _run_pipeline_module
+    if _run_pipeline_module is not None:
+        return _run_pipeline_module
+    with _run_pipeline_import_lock:
+        if _run_pipeline_module is None:
+            sys.path.insert(0, str(_SYNCNET_DIR))
+            try:
+                import run_pipeline  # type: ignore
+            finally:
+                sys.path.remove(str(_SYNCNET_DIR))
+            _run_pipeline_module = run_pipeline
+    return _run_pipeline_module
+
+
 def _run_face_track_crop(video_path: str, data_dir: Path, reference: str) -> None:
-    """Stage 1: face detection + tracking + crop, via subprocess: run_pipeline.py
-    calls `parser.parse_args()` at module scope, so it can't be imported as a
-    library. The video path is resolved to absolute since we invoke it with a
-    different cwd."""
+    """Stage 1: face detection + tracking + crop.
+
+    Runs in-process via `run_pipeline.run_face_track_pipeline`, not as a
+    subprocess. This is a memory optimization, not just a simplification:
+    a subprocess pays for its own separate import of torch/cv2/numpy (and
+    its own resident copy of the S3FD model) on top of whatever this
+    process already has loaded for `SyncNetInstance`. Running in-process
+    means both stages share one loaded copy of everything instead of two.
+    Measured directly, this is the single largest remaining memory cost
+    after the `BATCH_SIZE`/`torch.no_grad()` fixes (see their own
+    comments): on a host with a hard memory cap (Render's free tier,
+    512MB), a second full torch import is the difference between fitting
+    and getting OOM-killed mid-request.
+
+    All paths passed to `run_pipeline` here are already absolute (video
+    path resolved by the caller, `data_dir` resolved below, and S3FD's
+    own weight file resolved relative to its own module file rather than
+    cwd, see `fetch_syncnet.sh`'s S3FD patch), so unlike the old
+    subprocess call this needs no `cwd=` override: mutating the actual
+    process's cwd would be a global change unsafe to make from a worker
+    thread during concurrent piecewise refinement (see
+    `piecewise_offset.MAX_REFINE_WORKERS`).
+
+    A `ThreadPoolExecutor` of one, rather than a plain function call,
+    exists solely to preserve the old subprocess's hard wall-clock
+    timeout (`SYNCSENTRY_SYNCNET_TIMEOUT_S`): unlike a subprocess, a
+    Python thread can't be forcibly killed, so on timeout the underlying
+    work may keep running in the background even after this raises;
+    that's an acceptable tradeoff for what is meant as a rare safety net
+    on an already-slow host, not the common path.
+    """
     min_track = _adaptive_min_track(video_path)
-    cmd = [
-        sys.executable, "run_pipeline.py",
-        "--videofile", str(Path(video_path).resolve()),
-        "--reference", reference,
-        "--min_track", str(min_track),
-        "--facedet_scale", str(FACEDET_SCALE),
-        "--data_dir", str(data_dir.resolve()),
-        "--overwrite",
-    ]
-    try:
-        proc = subprocess.run(cmd, cwd=str(_SYNCNET_DIR), capture_output=True, text=True,
-                               timeout=SYNCNET_TIMEOUT_S)
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            f"SyncNet face-tracking stage exceeded the {SYNCNET_TIMEOUT_S:.0f}s budget "
-            f"(SYNCSENTRY_SYNCNET_TIMEOUT_S) and was killed; this host is likely too "
-            f"CPU-constrained to run it on this clip in a reasonable time"
-        ) from exc
-    if proc.returncode != 0:
-        raise RuntimeError(f"SyncNet face-tracking stage failed:\n{proc.stderr[-4000:]}")
+    run_pipeline = _get_run_pipeline_module()
+    opt = argparse.Namespace(
+        data_dir=str(data_dir.resolve()),
+        videofile=str(Path(video_path).resolve()),
+        reference=reference,
+        facedet_scale=FACEDET_SCALE,
+        crop_scale=0.40,
+        min_track=min_track,
+        frame_rate=25,
+        num_failed_det=25,
+        min_face_size=100,
+        overwrite=True,
+    )
+    run_pipeline._fill_derived_dirs(opt)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(run_pipeline.run_face_track_pipeline, opt)
+        try:
+            future.result(timeout=SYNCNET_TIMEOUT_S)
+        except _FutureTimeoutError as exc:
+            raise RuntimeError(
+                f"SyncNet face-tracking stage exceeded the {SYNCNET_TIMEOUT_S:.0f}s budget "
+                f"(SYNCSENTRY_SYNCNET_TIMEOUT_S); this host is likely too CPU-constrained "
+                f"to run it on this clip in a reasonable time"
+            ) from exc
+        except SystemExit as exc:
+            raise RuntimeError(f"SyncNet face-tracking stage failed: {exc}") from exc
+        except subprocess.CalledProcessError as exc:
+            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+            raise RuntimeError(f"SyncNet face-tracking stage failed:\n{stderr[-4000:]}") from exc
 
 
 def _mouth_motion_speaking_mask(crop_file: Path, n_frames: int) -> np.ndarray:
