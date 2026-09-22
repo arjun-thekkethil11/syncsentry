@@ -2,11 +2,18 @@ services:
   # Full build: installs torch + fetches SyncNet so use_syncnet actually
   # runs the learned detector. On Render's free instance type (0.1 CPU /
   # 512MB, a hard allocation, not a burstable one), the env vars below
-  # keep this bounded and safe rather than fast: SyncNet inference is
-  # still CPU-bound and will typically take several minutes per request
-  # on 0.1 CPU no matter how it's tuned. For an actually fast SyncNet
-  # path, host the API somewhere with more than a fraction of a core
-  # instead (see SETUP.md's Deploying section).
+  # keep this bounded rather than fast: SyncNet inference is still
+  # CPU-bound, and 0.1 CPU is roughly one-tenth of a single shared core,
+  # so real inference time is dominated by that hardware allocation, not
+  # by how the software is tuned. `analyzer/syncsentry/lipsync/
+  # syncnet_offset.py`'s `FACEDET_SCALE` and the piecewise-detection fix
+  # in `piecewise_offset.MIN_SEGMENT_SUPPORT_CHUNKS` both cut real,
+  # measured wall time substantially (see their own comments), but
+  # neither changes the underlying hardware ceiling: a strict
+  # under-30-second budget for real face-detection + CNN inference is not
+  # realistically achievable on 0.1 CPU. For that, host the API somewhere
+  # with more than a fraction of a core instead (see SETUP.md's Deploying
+  # section).
   #
   # To go back to the lightweight, coarse-detector-only build (faster to
   # deploy, no torch, always falls back safely), drop requirements-ml.txt
@@ -44,8 +51,18 @@ services:
       # Wall-clock cost scales close to linearly with this, so smaller
       # keeps a single request's worst case more predictable on a slow
       # host, at the cost of a smaller sample.
+      #
+      # Left at the code's own default (20s) rather than shrunk further:
+      # measured directly against the real-content blind benchmark, 8s
+      # is not just slower-vs-faster, it actively produces wrong answers
+      # on longer/multi-scene dialogue content (S3FD finds no trackable
+      # face in an 8s window centered on some of those clips, silently
+      # falling back to the much less accurate coarse detector). 20s is
+      # the shortest value confirmed to still find a real face track and
+      # the correct offset on that same content; going shorter trades
+      # away correctness for speed, not just speed for speed.
       - key: SYNCSENTRY_MAX_ANALYZE_DURATION_S
-        value: "8"
+        value: "20"
       # Hard ceiling on the face-tracking subprocess so a single request
       # can never hang indefinitely: past this, it aborts and falls back
       # to the coarse detector instead of the caller waiting forever.
