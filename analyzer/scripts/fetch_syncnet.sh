@@ -165,4 +165,73 @@ else
   echo "run_pipeline.py already patched (CPU + threaded face detection), skipping."
 fi
 
+# Patch: run SyncNetInstance's CNN forward passes under torch.no_grad(),
+# and stop forcing a float64 intermediate copy of the (uint8) frame
+# tensor before its final float32 cast.
+#
+# Neither changes SyncNet's output: no_grad() only turns off autograd's
+# bookkeeping for a graph that a pure-inference call like this never
+# uses (nothing here ever calls .backward()), and the float64 copy was
+# immediately narrowed back to float32 by the very next call, i.e. it
+# was already a no-op numerically, just an extra full-size allocation
+# on the way there. Measured directly, together these roughly halve
+# this stage's peak memory; most of the remaining reduction comes from
+# fetch_syncnet.sh's caller passing a smaller opt.batch_size (see
+# `syncsentry/lipsync/syncnet_offset.py`'s BATCH_SIZE), since batch size
+# is this forward pass's dominant memory cost, upstream's own default
+# (20) far more than needed on a memory-capped host.
+#
+# Idempotent: checks before patching.
+if ! grep -q "with torch.no_grad():" "$DEST/SyncNetInstance.py"; then
+  echo "Patching SyncNetInstance.py: no_grad() + drop float64 intermediate ..."
+  python3 - "$DEST/SyncNetInstance.py" <<'PYEOF'
+import sys
+path = sys.argv[1]
+src = open(path).read()
+
+old_loop = '''        tS = time.time()
+        for i in range(0,lastframe,opt.batch_size):
+
+            im_batch = [ imtv[:,:,vframe:vframe+5,:,:] for vframe in range(i,min(lastframe,i+opt.batch_size)) ]
+            im_in = torch.cat(im_batch,0)
+            im_out  = self.__S__.forward_lip(im_in.to(self.device))
+            im_feat.append(im_out.data.cpu())
+
+            cc_batch = [ cct[:,:,:,vframe*4:vframe*4+20] for vframe in range(i,min(lastframe,i+opt.batch_size)) ]
+            cc_in = torch.cat(cc_batch,0)
+            cc_out  = self.__S__.forward_aud(cc_in.to(self.device))
+            cc_feat.append(cc_out.data.cpu())
+
+        im_feat = torch.cat(im_feat,0)
+        cc_feat = torch.cat(cc_feat,0)'''
+new_loop = '''        tS = time.time()
+        with torch.no_grad():
+            for i in range(0,lastframe,opt.batch_size):
+
+                im_batch = [ imtv[:,:,vframe:vframe+5,:,:] for vframe in range(i,min(lastframe,i+opt.batch_size)) ]
+                im_in = torch.cat(im_batch,0)
+                im_out  = self.__S__.forward_lip(im_in.to(self.device))
+                im_feat.append(im_out.data.cpu())
+
+                cc_batch = [ cct[:,:,:,vframe*4:vframe*4+20] for vframe in range(i,min(lastframe,i+opt.batch_size)) ]
+                cc_in = torch.cat(cc_batch,0)
+                cc_out  = self.__S__.forward_aud(cc_in.to(self.device))
+                cc_feat.append(cc_out.data.cpu())
+
+        im_feat = torch.cat(im_feat,0)
+        cc_feat = torch.cat(cc_feat,0)'''
+assert old_loop in src, 'expected evaluate() batch loop not found, upstream SyncNetInstance.py may have changed'
+src = src.replace(old_loop, new_loop, 1)
+
+assert src.count('im.astype(float)') == 2, 'expected two im.astype(float) occurrences not found'
+src = src.replace('torch.from_numpy(im.astype(float)).float()', 'torch.from_numpy(im).float()')
+assert src.count('cc.astype(float)') == 1, 'expected one cc.astype(float) occurrence not found'
+src = src.replace('torch.from_numpy(cc.astype(float)).float()', 'torch.from_numpy(cc).float()')
+
+open(path, 'w').write(src)
+PYEOF
+else
+  echo "SyncNetInstance.py already patched (no_grad + float32), skipping."
+fi
+
 echo "Done. Try: syncsentry fix --video <file> --out-dir ./out --use-syncnet"

@@ -1,24 +1,46 @@
 services:
   # Full build: installs torch + fetches SyncNet so use_syncnet actually
   # runs the learned detector. On Render's free instance type (0.1 CPU /
-  # 512MB, a hard allocation, not a burstable one), the env vars below
-  # keep this bounded rather than fast: SyncNet inference is still
-  # CPU-bound, and 0.1 CPU is roughly one-tenth of a single shared core,
-  # so real inference time is dominated by that hardware allocation, not
-  # by how the software is tuned. `analyzer/syncsentry/lipsync/
-  # syncnet_offset.py`'s `FACEDET_SCALE` and the piecewise-detection fix
-  # in `piecewise_offset.MIN_SEGMENT_SUPPORT_CHUNKS` both cut real,
-  # measured wall time substantially (see their own comments), but
-  # neither changes the underlying hardware ceiling: a strict
-  # under-30-second budget for real face-detection + CNN inference is not
-  # realistically achievable on 0.1 CPU. For that, host the API somewhere
-  # with more than a fraction of a core instead (see SETUP.md's Deploying
-  # section).
+  # 512MB, both hard allocations, not burstable), two separate limits
+  # both matter here and were fixed separately:
+  #
+  # 1. CPU: 0.1 CPU is roughly one-tenth of a single shared core, so real
+  #    inference time is dominated by that hardware allocation, not by
+  #    how the software is tuned. `analyzer/syncsentry/lipsync/
+  #    syncnet_offset.py`'s `FACEDET_SCALE` and the piecewise-detection
+  #    fix in `piecewise_offset.MIN_SEGMENT_SUPPORT_CHUNKS` both cut real,
+  #    measured wall time substantially (see their own comments), but
+  #    neither changes the underlying hardware ceiling: a strict
+  #    under-30-second budget for real face-detection + CNN inference is
+  #    not realistically achievable on 0.1 CPU alone.
+  #
+  # 2. Memory, the more severe of the two: measured directly, one
+  #    use_syncnet request's peak memory (parent process plus the S3FD
+  #    face-tracking subprocess it launches) was over 2.6GB against this
+  #    plan's 512MB *hard* cap, over 5x, before the fixes below. Unlike
+  #    CPU, which just runs slower when scarce, exceeding a memory cap
+  #    gets the whole process OOM-killed outright, mid-request, and the
+  #    next request pays a full cold-start again (re-importing torch,
+  #    reloading every model): this, not raw compute time, is the likely
+  #    cause of requests that seem to hang far longer than the actual
+  #    algorithm should take. Three fixes, all in `syncnet_offset.py`
+  #    (BATCH_SIZE) and patched into the vendored SyncNet code by
+  #    `fetch_syncnet.sh` (torch.no_grad() during inference, dropping a
+  #    redundant float64 copy of the video tensor), cut that peak by
+  #    roughly 3-4x with zero change to detected offsets, confidence
+  #    scores, or wall time (if anything, slightly faster) on every clip
+  #    tested. Even after these fixes, a single request's peak is still
+  #    measured above 512MB, so OOM kills on this specific free plan are
+  #    reduced, not eliminated, by software changes alone; the remaining
+  #    headroom needs either a plan with more than 512MB, or a larger
+  #    change (running S3FD in-process instead of as its own subprocess,
+  #    to stop paying for a second torch import).
   #
   # To go back to the lightweight, coarse-detector-only build (faster to
-  # deploy, no torch, always falls back safely), drop requirements-ml.txt
-  # and the fetch_syncnet.sh line from buildCommand, and drop the
-  # SyncNet-specific envVars below.
+  # deploy, no torch, always falls back safely, and has none of the
+  # memory profile above since it never loads SyncNet or S3FD), drop
+  # requirements-ml.txt and the fetch_syncnet.sh line from buildCommand,
+  # and drop the SyncNet-specific envVars below.
   - type: web
     runtime: python
     name: syncsentry-api

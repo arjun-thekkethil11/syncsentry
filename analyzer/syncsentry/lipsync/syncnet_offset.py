@@ -98,6 +98,25 @@ DEFAULT_MAX_ANALYZE_DURATION_S: float | None = float(
 # faces where this matters (e.g. wide group shots), at the cost of speed.
 FACEDET_SCALE = float(os.environ.get("SYNCSENTRY_FACEDET_SCALE", "0.10"))
 
+# Batch size for `SyncNetInstance.evaluate()`'s own CNN forward pass
+# (upstream's own default, unchanged since `joonson/syncnet_python`, is
+# 20). Measured directly: this is the single largest memory cost in the
+# whole module, dwarfing everything else (model weights, S3FD detection,
+# the crop files themselves). At batch_size=20, one `evaluate()` call on
+# an 8s single-track clip added ~800MB of peak RSS on top of everything
+# already loaded; at batch_size=4, the same call added under 100MB, on
+# an identical input, with an identical result (offset and confidence
+# both bit-for-bit unchanged across every batch size tested) and no
+# slower (the CNN's total FLOPs are the same either way; CPU inference
+# gets no real benefit from a bigger batch dimension the way a GPU would,
+# so there is no meaningful speed trade-off here, only a memory one).
+# This matters most on a memory-capped host (e.g. Render's free tier,
+# 512MB hard limit): unlike CPU, which just runs slower when scarce,
+# exceeding a memory cap gets the process OOM-killed outright, mid
+# request, with no fallback. Overridable via SYNCSENTRY_BATCH_SIZE for a
+# host with memory to spare that wants to test raising it back up.
+BATCH_SIZE = int(os.environ.get("SYNCSENTRY_BATCH_SIZE", "4"))
+
 # Overridable via SYNCSENTRY_SYNCNET_TIMEOUT_S: a hard ceiling on the S3FD
 # face-tracking subprocess (`_run_face_track_crop` below), the dominant
 # cost of this whole module. `None` (default) means no limit, matching
@@ -624,7 +643,7 @@ def estimate_syncnet_tracks(video_path: str, vshift: int = 15, window_s: float =
         # a no-op addition then.
         pre_shift_frames = -pre_shift_ms / (1000.0 / frame_rate)
 
-        opt = argparse.Namespace(batch_size=20, vshift=vshift,
+        opt = argparse.Namespace(batch_size=BATCH_SIZE, vshift=vshift,
                                   tmp_dir=str(data_dir / "pytmp"), reference=reference)
         s = _get_syncnet_instance()
 
