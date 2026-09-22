@@ -144,16 +144,36 @@ CHANGE_TOLERANCE_MS = 200.0
 MIN_SEGMENT_DURATION_S = 6.0
 
 # Even above that duration floor, require at least this many chunks per
-# segment. 1, not >= 2: each chunk here is held to the same coverage floor
-# and periodicity self-check as
-# `wide_range_offset.estimate_wide_range_offset`'s own single reading (see
-# `MIN_CHUNK_DURATION_S` above and `_chunk_offset` below), and that module
-# already trusts one reading at that bar, with corroboration happening
-# downstream (SyncNet's fine search) rather than requiring a second
-# independent wide-range reading first. Requiring 2 here would mean no
-# segment shorter than 2x the floor could ever be trusted, which is
-# stricter than the bar already used for the same estimator elsewhere.
-MIN_SEGMENT_SUPPORT_CHUNKS = 1
+# segment before it can trigger the expensive per-segment SyncNet
+# refinement path at all.
+#
+# Was 1 (each chunk held to the same coverage floor and periodicity
+# self-check as `wide_range_offset.estimate_wide_range_offset`'s own
+# single reading, trusting corroboration to happen downstream in SyncNet's
+# fine search instead). Measured directly against real content, that
+# single-chunk trust was too generous: on `dialogue_full50s__n500ms`
+# (blind benchmark; one real, constant -500ms offset for the whole clip),
+# the fine-grained fallback tier's isolated 6s windows read +40ms,
+# +1880ms, +600ms, +60ms, four lone single-chunk "segments" each individually
+# clearing `MIN_CHUNK_CONFIDENCE`, none anywhere near the true value or
+# each other. Confidence alone does not catch this: a short window's
+# envelope correlation can look locally confident while still being
+# wrong, and downstream SyncNet refinement only proves that out after
+# already paying for a separate expensive S3FD+CNN call per lone chunk
+# (4x here for one clip with no real piecewise structure at all).
+#
+# Requiring >= 2 independently agreeing chunks (already merged by
+# `_merge_confident_chunks` before this filter runs) before a segment can
+# demand its own refinement call catches exactly this failure mode: a
+# genuinely uniform region reliably produces multiple neighboring chunks
+# that agree, while an isolated noisy reading has nothing to agree with
+# and gets discarded here instead of triggering a wasted SyncNet call.
+# Still permissive enough for real multi-region content: two agreeing
+# chunks needs only ~40-45s of combined coverage (2x `MIN_CHUNK_DURATION_S`
+# for the scene-gated tier, or two overlapping `FINE_WINDOW_S` windows for
+# the fine-grained one), well inside what a real multi-camera/stitched
+# edit's individual segments typically span.
+MIN_SEGMENT_SUPPORT_CHUNKS = 2
 
 # At least this many trusted, mutually-disagreeing segments are required
 # before concluding a clip is genuinely piecewise rather than well

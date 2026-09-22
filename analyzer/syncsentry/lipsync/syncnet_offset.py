@@ -79,6 +79,25 @@ DEFAULT_MAX_ANALYZE_DURATION_S: float | None = float(
     os.environ.get("SYNCSENTRY_MAX_ANALYZE_DURATION_S", "20.0")
 )
 
+# Upstream `run_pipeline.py` downscales every frame by this factor before
+# feeding it to S3FD (the face detector), independent of source
+# resolution: the CNN forward pass cost is set by the resulting absolute
+# pixel count, not by how big the original frame was. Benchmarked
+# directly (both raw per-frame S3FD throughput and the full
+# detect+track+crop+SyncNet pipeline's final offset/confidence) on two
+# different real clips at 1920x1080 source: 0.25 (upstream's own
+# default, tuned for detecting small/distant faces in arbitrary photos)
+# spends most of this module's wall time here for no detection benefit
+# on typical talking-head/interview framing, where the speaker's face
+# already fills a large fraction of the frame. Dropping to 0.10 (effective
+# network input ~192px wide for a 1080p source) measured the identical
+# detected offset and equal-or-better SyncNet confidence on both clips,
+# while cutting this stage's wall time by more than half (the dominant
+# cost of the whole module for anything beyond a trivially short clip).
+# Overridable via SYNCSENTRY_FACEDET_SCALE for content with small/distant
+# faces where this matters (e.g. wide group shots), at the cost of speed.
+FACEDET_SCALE = float(os.environ.get("SYNCSENTRY_FACEDET_SCALE", "0.10"))
+
 # Overridable via SYNCSENTRY_SYNCNET_TIMEOUT_S: a hard ceiling on the S3FD
 # face-tracking subprocess (`_run_face_track_crop` below), the dominant
 # cost of this whole module. `None` (default) means no limit, matching
@@ -406,6 +425,7 @@ def _run_face_track_crop(video_path: str, data_dir: Path, reference: str) -> Non
         "--videofile", str(Path(video_path).resolve()),
         "--reference", reference,
         "--min_track", str(min_track),
+        "--facedet_scale", str(FACEDET_SCALE),
         "--data_dir", str(data_dir.resolve()),
         "--overwrite",
     ]
