@@ -88,8 +88,27 @@ services:
       # Hard ceiling on the face-tracking subprocess so a single request
       # can never hang indefinitely: past this, it aborts and falls back
       # to the coarse detector instead of the caller waiting forever.
+      #
+      # Was 180s: on this plan's 0.1 CPU, that let one request wait up to
+      # three minutes before giving up on a single SyncNet attempt, and
+      # (before the abort-signal fix in `piecewise_offset.py`/
+      # `pipeline.py`) a multi-region clip could pay that same 180s
+      # again per region and again for verification, compounding into
+      # requests that ran for many minutes. Both call sites now share one
+      # abort signal per request, so on this host SyncNet fails fast
+      # once and every later attempt in the same request skips straight
+      # to the coarse detector instead of re-discovering the same
+      # timeout. That makes a small single value here safe: it now
+      # bounds one request's worst case (one timeout, not N of them), so
+      # it's set tight enough to keep the whole request comfortably
+      # under a 30s target on this hardware, at the cost of SyncNet
+      # essentially never finishing in time on this specific free plan;
+      # it still always tries first and only falls back after failing to
+      # finish, so a stronger host (a paid plan, or SyncNet moved to a
+      # separate service with real CPU) gets full SyncNet benefit from
+      # the same code with no change other than this value.
       - key: SYNCSENTRY_SYNCNET_TIMEOUT_S
-        value: "180"
+        value: "15"
 
   - type: web
     runtime: static

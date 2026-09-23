@@ -71,6 +71,7 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -566,7 +567,8 @@ def detect_piecewise_offsets(video_path: str) -> PiecewiseResult:
 
 
 def refine_piecewise_segments_with_syncnet(video_path: str, segments: list[OffsetSegment],
-                                            min_confidence: float | None = None) -> list[OffsetSegment]:
+                                            min_confidence: float | None = None,
+                                            abort_event: threading.Event | None = None) -> list[OffsetSegment]:
     """Re-answers each "trusted" segment from `detect_piecewise_offsets`
     with SyncNet's own estimator, scoped to just that segment (via a
     physical, frame-accurate sub-clip, since SyncNet has no native
@@ -603,15 +605,34 @@ def refine_piecewise_segments_with_syncnet(video_path: str, segments: list[Offse
     skipping the step entirely, but it is only paid when the cheap
     classical pre-check above already found evidence of a piecewise
     structure worth spending it on, not for every clip.
+
+    `abort_event` (default `None`, meaning "create a fresh one for this
+    call only"): shared across every segment in this call. The first
+    segment whose SyncNet call fails with a host-level `RuntimeError`
+    (it hit `SYNCSENTRY_SYNCNET_TIMEOUT_S`, not a per-segment content
+    issue like "no trackable face") sets it, and every not-yet-started
+    segment then skips straight to "undetermined" without attempting its
+    own near-certainly-doomed SyncNet call. A host too CPU-constrained to
+    finish one segment's face-tracking within budget is essentially
+    certain to be too constrained for the rest; retrying that same
+    failure N times (paying the full timeout N times over) buys no
+    realistic chance of a different outcome. Pass an event created by
+    the caller, rather than always making a fresh one here, so a caller
+    doing more than one refinement pass in the same request (e.g. a
+    verification pass after fixing) can share "SyncNet is stuck on this
+    host for this request" across both instead of re-discovering it.
     """
     min_confidence_resolved = min_confidence
     trusted_indices = [i for i, seg in enumerate(segments) if seg.status == "trusted"]
     if not trusted_indices:
         return list(segments)
 
+    if abort_event is None:
+        abort_event = threading.Event()
+
     with tempfile.TemporaryDirectory() as td:
         results = _refine_segments_concurrently(
-            video_path, segments, trusted_indices, Path(td), min_confidence_resolved,
+            video_path, segments, trusted_indices, Path(td), min_confidence_resolved, abort_event,
         )
 
     refined: list[OffsetSegment] = []
@@ -662,16 +683,31 @@ _THREAD_BUDGET_ENV_VARS = (
 
 
 def _refine_one_segment(video_path: str, seg: OffsetSegment, index: int, tmp_dir: Path,
-                         min_confidence: float) -> OffsetSegment:
+                         min_confidence: float,
+                         abort_event: threading.Event | None = None) -> OffsetSegment:
     """The per-segment work `refine_piecewise_segments_with_syncnet` farms
     out to a worker: cut this segment's own sub-clip, run SyncNet on it,
     and translate the result into an `OffsetSegment`. Factored out as its
     own function so `_refine_segments_concurrently` can dispatch it.
 
     Never raises: every failure mode (ffmpeg cut failed, SyncNet
-    unavailable, no trackable face, low confidence) becomes an
-    "undetermined" segment.
+    unavailable, no trackable face, low confidence, or SyncNet's own
+    `RuntimeError` on exceeding `SYNCSENTRY_SYNCNET_TIMEOUT_S`) becomes an
+    "undetermined" segment instead of propagating out of this call.
+
+    If `abort_event` is already set when this segment starts (a previous
+    segment in the same call already hit the host-level timeout above),
+    skips straight to "undetermined" without cutting a sub-clip or
+    calling SyncNet at all: see `refine_piecewise_segments_with_syncnet`'s
+    docstring for why retrying an near-certainly-doomed call per segment
+    isn't worth the wall time. If *this* segment is the one that first
+    hits that timeout, sets `abort_event` before returning so later
+    segments (sequential) or already-dispatched ones (concurrent) get the
+    same fast skip.
     """
+    if abort_event is not None and abort_event.is_set():
+        return OffsetSegment(seg.start_s, seg.end_s, None, None, "undetermined")
+
     from syncsentry.lipsync.syncnet_offset import SyncNetUnavailable, estimate_syncnet_offset
 
     ffmpeg = _require_binary("ffmpeg")
@@ -695,6 +731,15 @@ def _refine_one_segment(video_path: str, seg: OffsetSegment, index: int, tmp_dir
         est = estimate_syncnet_offset(sub_clip)
     except (SyncNetUnavailable, ValueError):
         return OffsetSegment(seg.start_s, seg.end_s, None, None, "undetermined")
+    except RuntimeError:
+        # Host-level failure (S3FD subprocess crashed, or exceeded
+        # SYNCSENTRY_SYNCNET_TIMEOUT_S), not a content issue with this
+        # specific segment: trip the shared abort signal so remaining
+        # segments in this call don't each independently pay the same
+        # timeout to rediscover the same thing.
+        if abort_event is not None:
+            abort_event.set()
+        return OffsetSegment(seg.start_s, seg.end_s, None, None, "undetermined")
 
     if est.confidence >= min_confidence:
         return OffsetSegment(
@@ -706,9 +751,17 @@ def _refine_one_segment(video_path: str, seg: OffsetSegment, index: int, tmp_dir
 
 def _refine_segments_concurrently(video_path: str, segments: list[OffsetSegment],
                                    trusted_indices: list[int], tmp_dir: Path,
-                                   min_confidence: float | None) -> dict[int, OffsetSegment]:
+                                   min_confidence: float | None,
+                                   abort_event: threading.Event | None = None) -> dict[int, OffsetSegment]:
     """Runs `_refine_one_segment` for every trusted-segment index, in
     parallel rather than one at a time.
+
+    `abort_event` is shared across every call dispatched here (sequential
+    or concurrent); see `_refine_one_segment`'s docstring for what trips
+    it and what each call does when it's already set. In the concurrent
+    branch, workers already dispatched before it trips still run to
+    completion (there's no way to cancel a running thread), but every
+    call not yet started skips its own doomed attempt.
 
     Safe: each call operates on its own sub-clip file (`segment_{i}.mp4`,
     distinct per index) and its own `SyncNetInstance`/temp working
@@ -733,7 +786,7 @@ def _refine_segments_concurrently(video_path: str, segments: list[OffsetSegment]
     n_workers = max(1, min(len(trusted_indices), MAX_REFINE_WORKERS))
 
     if n_workers == 1:
-        return {i: _refine_one_segment(video_path, segments[i], i, tmp_dir, min_confidence)
+        return {i: _refine_one_segment(video_path, segments[i], i, tmp_dir, min_confidence, abort_event)
                 for i in trusted_indices}
 
     threads_per_worker = max(1, (os.cpu_count() or n_workers) // n_workers)
@@ -747,7 +800,8 @@ def _refine_segments_concurrently(video_path: str, segments: list[OffsetSegment]
         results: dict[int, OffsetSegment] = {}
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
             futures = {
-                pool.submit(_refine_one_segment, video_path, segments[i], i, tmp_dir, min_confidence): i
+                pool.submit(_refine_one_segment, video_path, segments[i], i, tmp_dir,
+                            min_confidence, abort_event): i
                 for i in trusted_indices
             }
             for future in as_completed(futures):

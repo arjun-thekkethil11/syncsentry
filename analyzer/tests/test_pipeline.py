@@ -259,7 +259,7 @@ def test_maybe_fix_piecewise_backs_out_when_confirmed_segments_agree(tmp_path, m
         return PiecewiseResult(is_piecewise=True, segments=noisy_pre_check_segments,
                                 video_duration_s=30.0, n_chunks_evaluated=3, n_chunks_confident=3)
 
-    def fake_refine(video_path, segments, min_confidence=None):
+    def fake_refine(video_path, segments, min_confidence=None, abort_event=None):
         # SyncNet refinement overrides the noisy classical numbers with
         # its own; all three happen to agree on the same real offset.
         return [
@@ -313,7 +313,7 @@ def test_maybe_fix_piecewise_keeps_piecewise_path_when_segments_genuinely_disagr
         return PiecewiseResult(is_piecewise=True, segments=pre_check_segments,
                                 video_duration_s=20.0, n_chunks_evaluated=2, n_chunks_confident=2)
 
-    def fake_refine(video_path, segments, min_confidence=None):
+    def fake_refine(video_path, segments, min_confidence=None, abort_event=None):
         return [
             OffsetSegment(0.0, 10.0, 310.0, 8.0, "trusted"),
             OffsetSegment(10.0, 20.0, -505.0, 8.0, "trusted"),

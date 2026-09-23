@@ -26,6 +26,7 @@ work.
 from __future__ import annotations
 
 import statistics
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -152,6 +153,16 @@ class _AVDetection:
     # pass as its own safety net); holding both to the same bar would let
     # a low-evidence in-sync claim pass silently.
     n_confident_windows: int | None = None
+    # True only when `use_syncnet` was requested and it failed with a
+    # host-level `RuntimeError` (exceeded `SYNCSENTRY_SYNCNET_TIMEOUT_S`,
+    # or the face-tracking subprocess crashed outright), as opposed to a
+    # per-video reason ("no trackable face", "not installed"). Callers
+    # that make a second SyncNet attempt later in the same request (the
+    # post-fix residual verification below) check this to skip that
+    # second attempt instead of paying the same timeout twice: a host too
+    # CPU-constrained to finish once is essentially certain to be too
+    # constrained to finish again moments later on the same file.
+    syncnet_timed_out: bool = False
 
 
 def _detect_av_offset(video_path: str, av_threshold_ms: float, use_syncnet: bool,
@@ -192,6 +203,7 @@ def _detect_av_offset(video_path: str, av_threshold_ms: float, use_syncnet: bool
     passes something other than the default.
     """
     fallback_note = None
+    timed_out = False
     if use_syncnet:
         syncnet_kwargs = {}
         if max_analyze_duration_s is not None:
@@ -226,10 +238,11 @@ def _detect_av_offset(video_path: str, av_threshold_ms: float, use_syncnet: bool
             # SyncNet being unusable right now on this host is not the
             # same as the request itself failing.
             fallback_note = f"--use-syncnet failed ({exc}); used the coarse detector instead"
+            timed_out = True
 
     coarse = estimate_av_offset(video_path, in_sync_threshold_ms=av_threshold_ms)
     return _AVDetection(coarse.offset_ms, coarse.confidence, coarse.direction,
-                         av_min_confidence, "coarse", fallback_note)
+                         av_min_confidence, "coarse", fallback_note, syncnet_timed_out=timed_out)
 
 
 def _maybe_fix_piecewise(video_path: str, corrected_video_path: Path, av_threshold_ms: float,
@@ -267,8 +280,17 @@ def _maybe_fix_piecewise(video_path: str, corrected_video_path: Path, av_thresho
     if not pre.is_piecewise:
         return None
 
+    # Shared across both refinement passes below (this one, and the
+    # post-fix verification pass further down): the first segment whose
+    # SyncNet call times out on this host trips it, and every later
+    # segment in either pass then skips its own doomed attempt instead of
+    # re-paying the same timeout. See `refine_piecewise_segments_with_
+    # syncnet`'s docstring.
+    syncnet_abort = threading.Event()
+
     refined = refine_piecewise_segments_with_syncnet(video_path, pre.segments,
-                                                       min_confidence=syncnet_min_confidence)
+                                                       min_confidence=syncnet_min_confidence,
+                                                       abort_event=syncnet_abort)
     fixable = [s for s in refined if s.status == "trusted" and s.offset_ms is not None
                and abs(s.offset_ms) > av_threshold_ms]
     if len(fixable) < MIN_FIXED_SEGMENTS_FOR_PIECEWISE_PATH:
@@ -299,7 +321,12 @@ def _maybe_fix_piecewise(video_path: str, corrected_video_path: Path, av_thresho
     if max(fixable_offsets) - min(fixable_offsets) <= PIECEWISE_AGREEMENT_TOLERANCE_MS:
         confirmed_offset_ms = statistics.median(fixable_offsets)
         fix_av_offset(video_path, corrected_video_path, confirmed_offset_ms)
-        residual_det = _detect_av_offset(str(corrected_video_path), av_threshold_ms, use_syncnet=True,
+        # `use_syncnet=not syncnet_abort.is_set()`: if refinement above
+        # already hit this host's SyncNet timeout on some other segment,
+        # skip straight to the coarse detector here too rather than
+        # paying that same timeout again for a verification pass.
+        residual_det = _detect_av_offset(str(corrected_video_path), av_threshold_ms,
+                                          use_syncnet=not syncnet_abort.is_set(),
                                           syncnet_min_confidence=syncnet_min_confidence,
                                           av_min_confidence=av_min_confidence,
                                           recenter_large_offsets=False,
@@ -357,7 +384,8 @@ def _maybe_fix_piecewise(video_path: str, corrected_video_path: Path, av_thresho
         for s in fixable
     ]
     verify_refined = refine_piecewise_segments_with_syncnet(
-        str(corrected_video_path), verify_segments, min_confidence=syncnet_min_confidence)
+        str(corrected_video_path), verify_segments, min_confidence=syncnet_min_confidence,
+        abort_event=syncnet_abort)
     residual_confident_and_bad = any(
         s.status == "trusted" and s.offset_ms is not None and abs(s.offset_ms) > av_threshold_ms
         for s in verify_refined
@@ -583,7 +611,17 @@ def _fix_single_global_offset(video_path: Path, corrected_video_path: Path, av_t
         # `recenter_large_offsets=False`: independent verification, not a
         # re-run of the same estimator that selected the correction. See
         # the docstring on `_detect_av_offset`.
-        residual_det = _detect_av_offset(str(corrected_video_path), av_threshold_ms, use_syncnet,
+        #
+        # `use_syncnet and not det.syncnet_timed_out`: if the detection
+        # call above already hit SyncNet's own host-level timeout, this
+        # host is essentially certain to time out again on the same
+        # file's corrected copy moments later. Skipping straight to the
+        # coarse detector here avoids paying that same multi-second-to-
+        # multi-minute timeout a second time in one request for no
+        # realistic chance of a different outcome; see
+        # `_AVDetection.syncnet_timed_out`.
+        residual_det = _detect_av_offset(str(corrected_video_path), av_threshold_ms,
+                                          use_syncnet and not det.syncnet_timed_out,
                                           syncnet_min_confidence, av_min_confidence,
                                           recenter_large_offsets=False,
                                           max_analyze_duration_s=RESIDUAL_VERIFY_MAX_ANALYZE_DURATION_S)
