@@ -2,10 +2,12 @@
 
 Detects and fixes audio/video sync drift in video files, using lip motion and speech, not captions or timestamps.
 
-<p>
-  <img src="docs/images/webapp-processing.png" alt="Processing view with a rotating fact about the uploaded asset" width="420">
-  <img src="docs/images/webapp-results.png" alt="Results view with a before/after preview of the detected fix" width="420">
-</p>
+<table>
+  <tr>
+    <td><img src="docs/images/webapp-processing.png" alt="Processing view with a rotating fact about the uploaded asset" width="380"></td>
+    <td><img src="docs/images/webapp-results.png" alt="Results view with a before/after preview of the detected fix" width="380"></td>
+  </tr>
+</table>
 
 *While it's working (this takes a bit, sync detection isn't instant), it keeps you occupied with facts about your video instead of a bare spinner. When it's done, it shows you the before and after side by side, so you never have to just take its word for it.*
 
@@ -13,12 +15,12 @@ Most sync tools assume one global offset for the whole file. Real content does n
 
 ## How it works
 
-In plain terms: it watches the video the way a person would, and it won't tell you something is fixed unless it can prove it to itself first.
+- Watches for who's talking on screen and listens for when they're actually speaking.
+- Works out how far the mouth movements and the voice are apart.
+- Fixes it. If different parts of the video are off by different amounts, each part gets its own fix instead of one number forced on everything.
+- Checks its own fix before calling anything "fixed." If it's not confident enough, it shows you a preview instead of guessing.
 
-1. **It figures out who's talking, and when.** It tracks faces on screen and listens for speech, so it only pays attention to the moments that actually matter for sync — a silent shot of a landscape has nothing to check. *(Face tracking via S3FD, speech detection via Silero VAD — both existing, published models, not something trained from scratch for this.)*
-2. **It measures how far off the lips and the voice are.** For each of those moments, it checks how well the mouth movements match the audio at a range of possible timing offsets, and narrows in on the one that actually fits. *(A pretrained lip-sync model, SyncNet, does the fine-grained scoring; a cheaper pass runs first to cover large offsets quickly.)*
-3. **It doesn't assume the whole video has one single problem.** A compilation or a heavily-edited video can be out of sync differently in every clip, or drift worse over time. Instead of forcing one number onto the entire file, it splits the video and fixes each part on its own — and if a part can't be confidently fixed, it's left alone and flagged, not silently guessed at.
-4. **It checks its own work before calling anything "fixed."** After applying a correction, it re-measures the result the same way it measured the problem. Something is only ever reported as fixed once that re-check actually comes back clean. And if it isn't confident enough in its own answer to apply it automatically, it still won't guess — it renders a preview of what it *would* do, so a person can watch/listen and decide.
+The models doing the heavy lifting are listed under [Research](#research) below.
 
 ## Results
 
