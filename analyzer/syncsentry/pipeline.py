@@ -25,8 +25,10 @@ work.
 """
 from __future__ import annotations
 
+import os
 import statistics
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -35,6 +37,7 @@ from syncsentry.detectors.coarse_xcorr import estimate_av_offset
 from syncsentry.fixer.av_fix import fix_av_offset
 from syncsentry.fixer.caption_fix import fix_caption_offset
 from syncsentry.lipsync import mtdvocalist_offset
+from syncsentry.lipsync import syncnet_offset
 from syncsentry.lipsync.syncnet_offset import (
     DEFAULT_SYNCNET_MIN_CONFIDENCE,
     SyncNetUnavailable,
@@ -136,6 +139,29 @@ PIECEWISE_AGREEMENT_TOLERANCE_MS = 150.0
 # unverified rather than resolved.
 MAX_UNDETERMINED_FRACTION_FOR_PIECEWISE_FIXED = 0.20
 
+# `_maybe_fix_piecewise`'s own classical pre-check (`detect_piecewise_
+# offsets`) decodes and face-scans the *whole* clip before any SyncNet
+# work even starts, and before `syncnet_deadline` has any effect on it
+# (that deadline only bounds SyncNet calls, not this classical stage).
+# Measured directly on a real ~60s clip: 24.2s on its own, on a normal
+# dev machine with a full CPU core - on Render's 0.1-CPU free tier this
+# would be proportionally far worse, and would blow the whole request's
+# 30s budget by itself before a single SyncNet call ever ran, regardless
+# of how tight `SYNCSENTRY_SYNCNET_TIMEOUT_S` is set. Piecewise
+# (multi-source) content is the rare case (see `_maybe_fix_piecewise`'s
+# own docstring: single-source uploads are "the overwhelming common
+# case"), so it isn't worth guaranteeing this cost on every request just
+# to catch it. Skip attempting the piecewise path entirely whenever the
+# configured per-call SyncNet budget is too small to plausibly afford
+# both this pre-check and at least one real refinement attempt
+# afterward, and fall through to the single-global path instead (one
+# whole-clip detect/fix/verify, no whole-video multi-region scan).
+# `None` (no per-call cap configured) always allows it, matching that
+# setup's existing unbounded behavior.
+PIECEWISE_MIN_SYNCNET_BUDGET_S = float(
+    os.environ.get("SYNCSENTRY_PIECEWISE_MIN_SYNCNET_BUDGET_S", "45")
+)
+
 
 @dataclass
 class _AVDetection:
@@ -165,11 +191,31 @@ class _AVDetection:
     syncnet_timed_out: bool = False
 
 
+def _remaining_syncnet_budget_s(deadline: float | None) -> float | None:
+    """Converts a request-wide SyncNet deadline (a `time.monotonic()`
+    timestamp, set once per `run_fix_pipeline` call, see that function)
+    into "how many seconds does the *next* SyncNet call get", so several
+    SyncNet attempts in one request (piecewise's per-segment refinement,
+    its own verification pass, and/or the single-global path's detect +
+    verify) share one real ceiling on their combined wall time instead of
+    each independently getting the full per-call budget.
+
+    `None` deadline means no request-wide budget is configured
+    (`SYNCSENTRY_SYNCNET_TIMEOUT_S` unset): returns `None`, so callers
+    fall back to `estimate_syncnet_offset`'s own per-call default
+    (unlimited), identical to behavior before this budget existed.
+    """
+    if deadline is None:
+        return None
+    return deadline - time.monotonic()
+
+
 def _detect_av_offset(video_path: str, av_threshold_ms: float, use_syncnet: bool,
                        syncnet_min_confidence: float, av_min_confidence: float,
                        use_mtdvocalist: bool = False,
                        recenter_large_offsets: bool = True,
-                       max_analyze_duration_s: float | None = None) -> _AVDetection:
+                       max_analyze_duration_s: float | None = None,
+                       syncnet_deadline: float | None = None) -> _AVDetection:
     """Picks which detector actually runs.
 
     SyncNet is far more accurate on real talking-head content than the
@@ -201,13 +247,33 @@ def _detect_av_offset(video_path: str, av_threshold_ms: float, use_syncnet: bool
     `estimate_syncnet_offset`'s own default"): forwarded as-is. See
     `RESIDUAL_VERIFY_MAX_ANALYZE_DURATION_S` above for the one caller that
     passes something other than the default.
+
+    `syncnet_deadline` (default `None`, meaning "no request-wide budget,
+    each call gets the full per-call default"): a `time.monotonic()`
+    deadline shared across every SyncNet call this *request* makes (see
+    `run_fix_pipeline`). If the budget is already exhausted by the time
+    this call would start, it's treated the same as a timeout (falls back
+    to the coarse detector, `syncnet_timed_out=True`) without even
+    attempting SyncNet; otherwise the *remaining* time, not the full
+    per-call default, is passed as this call's own ceiling.
     """
     fallback_note = None
     timed_out = False
     if use_syncnet:
+        remaining_budget_s = _remaining_syncnet_budget_s(syncnet_deadline)
+        if remaining_budget_s is not None and remaining_budget_s <= 0:
+            fallback_note = ("--use-syncnet requested but this request's shared SyncNet time budget "
+                              "was already used up by an earlier attempt; used the coarse detector instead")
+            timed_out = True
+            coarse = estimate_av_offset(video_path, in_sync_threshold_ms=av_threshold_ms)
+            return _AVDetection(coarse.offset_ms, coarse.confidence, coarse.direction,
+                                 av_min_confidence, "coarse", fallback_note, syncnet_timed_out=timed_out)
+
         syncnet_kwargs = {}
         if max_analyze_duration_s is not None:
             syncnet_kwargs["max_analyze_duration_s"] = max_analyze_duration_s
+        if remaining_budget_s is not None:
+            syncnet_kwargs["timeout_s"] = remaining_budget_s
         try:
             est = estimate_syncnet_offset(video_path, in_sync_threshold_ms=av_threshold_ms,
                                            recenter_large_offsets=recenter_large_offsets, **syncnet_kwargs)
@@ -246,7 +312,8 @@ def _detect_av_offset(video_path: str, av_threshold_ms: float, use_syncnet: bool
 
 
 def _maybe_fix_piecewise(video_path: str, corrected_video_path: Path, av_threshold_ms: float,
-                          av_min_confidence: float, syncnet_min_confidence: float) -> IssueSummary | None:
+                          av_min_confidence: float, syncnet_min_confidence: float,
+                          syncnet_deadline: float | None = None) -> IssueSummary | None:
     """Attempts the piecewise (independent per-region) A/V sync path.
 
     See `syncsentry.lipsync.piecewise_offset`'s module docstring for why
@@ -290,7 +357,8 @@ def _maybe_fix_piecewise(video_path: str, corrected_video_path: Path, av_thresho
 
     refined = refine_piecewise_segments_with_syncnet(video_path, pre.segments,
                                                        min_confidence=syncnet_min_confidence,
-                                                       abort_event=syncnet_abort)
+                                                       abort_event=syncnet_abort,
+                                                       syncnet_deadline=syncnet_deadline)
     fixable = [s for s in refined if s.status == "trusted" and s.offset_ms is not None
                and abs(s.offset_ms) > av_threshold_ms]
     if len(fixable) < MIN_FIXED_SEGMENTS_FOR_PIECEWISE_PATH:
@@ -330,7 +398,8 @@ def _maybe_fix_piecewise(video_path: str, corrected_video_path: Path, av_thresho
                                           syncnet_min_confidence=syncnet_min_confidence,
                                           av_min_confidence=av_min_confidence,
                                           recenter_large_offsets=False,
-                                          max_analyze_duration_s=RESIDUAL_VERIFY_MAX_ANALYZE_DURATION_S)
+                                          max_analyze_duration_s=RESIDUAL_VERIFY_MAX_ANALYZE_DURATION_S,
+                                          syncnet_deadline=syncnet_deadline)
         residual_confident = residual_det.confidence >= residual_det.min_confidence
         fixed = residual_confident and abs(residual_det.offset_ms) <= av_threshold_ms
         note = (f"initially looked like it might have multiple independently-offset regions, but the "
@@ -385,7 +454,7 @@ def _maybe_fix_piecewise(video_path: str, corrected_video_path: Path, av_thresho
     ]
     verify_refined = refine_piecewise_segments_with_syncnet(
         str(corrected_video_path), verify_segments, min_confidence=syncnet_min_confidence,
-        abort_event=syncnet_abort)
+        abort_event=syncnet_abort, syncnet_deadline=syncnet_deadline)
     residual_confident_and_bad = any(
         s.status == "trusted" and s.offset_ms is not None and abs(s.offset_ms) > av_threshold_ms
         for s in verify_refined
@@ -477,10 +546,38 @@ def run_fix_pipeline(video_path: str | Path, out_dir: str | Path,
     # returns `None`, falling through to the unchanged single-global-offset
     # path below, for the overwhelming common case of single-source
     # content.
+    # Shared, request-wide ceiling on *all* SyncNet-related work this call
+    # does, however many separate attempts that ends up being (piecewise
+    # per-segment refinement, its own verification pass, and/or the
+    # single-global path's detect + verify). `SYNCSENTRY_SYNCNET_TIMEOUT_S`
+    # bounds one SyncNet call on its own (see `syncnet_offset.
+    # SYNCNET_TIMEOUT_S`), but on real dialogue content the piecewise path
+    # alone can make several such calls before concluding there isn't
+    # enough evidence to take that path, then still falls through to the
+    # single-global path's own attempt, each individually finishing well
+    # inside the per-call budget yet adding up to several times it.
+    # Measured directly: one real ~60s clip that never hit the per-call
+    # timeout at all still took 68s wall time this way. Computed once here
+    # (`None` when no per-call budget is configured, matching that
+    # setup's existing unbounded behavior) and threaded through every
+    # attempt below via `syncnet_deadline`/`_remaining_syncnet_budget_s`,
+    # so the *last* attempt any given request makes gets whatever's
+    # actually left, not a fresh full budget it has no real claim to.
+    syncnet_deadline = (
+        time.monotonic() + syncnet_offset.SYNCNET_TIMEOUT_S
+        if use_syncnet and syncnet_offset.SYNCNET_TIMEOUT_S is not None
+        else None
+    )
+
+    piecewise_worth_attempting = (
+        syncnet_offset.SYNCNET_TIMEOUT_S is None
+        or syncnet_offset.SYNCNET_TIMEOUT_S >= PIECEWISE_MIN_SYNCNET_BUDGET_S
+    )
     piecewise_issue = None
-    if use_syncnet and syncnet_is_available():
+    if use_syncnet and syncnet_is_available() and piecewise_worth_attempting:
         piecewise_issue = _maybe_fix_piecewise(str(video_path), corrected_video_path,
-                                                av_threshold_ms, av_min_confidence, syncnet_min_confidence)
+                                                av_threshold_ms, av_min_confidence, syncnet_min_confidence,
+                                                syncnet_deadline=syncnet_deadline)
 
     if piecewise_issue is not None:
         summary.issues.append(piecewise_issue)
@@ -489,6 +586,7 @@ def run_fix_pipeline(video_path: str | Path, out_dir: str | Path,
         summary.issues.append(_fix_single_global_offset(
             video_path, corrected_video_path, av_threshold_ms, av_min_confidence,
             use_syncnet, syncnet_min_confidence, use_mtdvocalist,
+            syncnet_deadline=syncnet_deadline,
         ))
 
     summary.output_files["corrected_video"] = str(corrected_video_path)
@@ -544,13 +642,14 @@ def run_fix_pipeline(video_path: str | Path, out_dir: str | Path,
 
 def _fix_single_global_offset(video_path: Path, corrected_video_path: Path, av_threshold_ms: float,
                                av_min_confidence: float, use_syncnet: bool, syncnet_min_confidence: float,
-                               use_mtdvocalist: bool) -> IssueSummary:
+                               use_mtdvocalist: bool, syncnet_deadline: float | None = None) -> IssueSummary:
     """The A/V sync detect/fix/verify logic for the single-global-offset
     path, extracted into its own function so `run_fix_pipeline` can
     choose between this and the piecewise path above without one giant
     nested conditional."""
     det = _detect_av_offset(str(video_path), av_threshold_ms, use_syncnet,
-                             syncnet_min_confidence, av_min_confidence, use_mtdvocalist)
+                             syncnet_min_confidence, av_min_confidence, use_mtdvocalist,
+                             syncnet_deadline=syncnet_deadline)
     method_tag = "" if det.method == "coarse" else f" [{det.method}]"
 
     if det.confidence < det.min_confidence:
@@ -624,7 +723,8 @@ def _fix_single_global_offset(video_path: Path, corrected_video_path: Path, av_t
                                           use_syncnet and not det.syncnet_timed_out,
                                           syncnet_min_confidence, av_min_confidence,
                                           recenter_large_offsets=False,
-                                          max_analyze_duration_s=RESIDUAL_VERIFY_MAX_ANALYZE_DURATION_S)
+                                          max_analyze_duration_s=RESIDUAL_VERIFY_MAX_ANALYZE_DURATION_S,
+                                          syncnet_deadline=syncnet_deadline)
         residual_confident = residual_det.confidence >= residual_det.min_confidence
         fixed = residual_confident and abs(residual_det.offset_ms) <= av_threshold_ms
         verify_note = det.fallback_note

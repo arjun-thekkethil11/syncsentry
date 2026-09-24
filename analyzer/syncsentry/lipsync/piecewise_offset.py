@@ -72,6 +72,7 @@ import os
 import subprocess
 import tempfile
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -568,7 +569,8 @@ def detect_piecewise_offsets(video_path: str) -> PiecewiseResult:
 
 def refine_piecewise_segments_with_syncnet(video_path: str, segments: list[OffsetSegment],
                                             min_confidence: float | None = None,
-                                            abort_event: threading.Event | None = None) -> list[OffsetSegment]:
+                                            abort_event: threading.Event | None = None,
+                                            syncnet_deadline: float | None = None) -> list[OffsetSegment]:
     """Re-answers each "trusted" segment from `detect_piecewise_offsets`
     with SyncNet's own estimator, scoped to just that segment (via a
     physical, frame-accurate sub-clip, since SyncNet has no native
@@ -621,6 +623,18 @@ def refine_piecewise_segments_with_syncnet(video_path: str, segments: list[Offse
     doing more than one refinement pass in the same request (e.g. a
     verification pass after fixing) can share "SyncNet is stuck on this
     host for this request" across both instead of re-discovering it.
+
+    `syncnet_deadline` (default `None`): a `time.monotonic()` deadline
+    shared across every SyncNet call this *whole request* makes (not just
+    this refinement call), see `pipeline.run_fix_pipeline`. Complements
+    `abort_event`: that one only trips after an actual timeout fires, so
+    it does nothing when every individual segment happens to finish
+    within its own per-call budget but several of them together still
+    add up to far more wall time than the request should take. Checked
+    before every segment starts; a segment with no meaningful time left
+    skips straight to "undetermined" the same way an already-tripped
+    `abort_event` does, and one with some time left gets *that* remaining
+    amount as its own ceiling instead of a fresh full per-call budget.
     """
     min_confidence_resolved = min_confidence
     trusted_indices = [i for i, seg in enumerate(segments) if seg.status == "trusted"]
@@ -633,6 +647,7 @@ def refine_piecewise_segments_with_syncnet(video_path: str, segments: list[Offse
     with tempfile.TemporaryDirectory() as td:
         results = _refine_segments_concurrently(
             video_path, segments, trusted_indices, Path(td), min_confidence_resolved, abort_event,
+            syncnet_deadline,
         )
 
     refined: list[OffsetSegment] = []
@@ -684,7 +699,8 @@ _THREAD_BUDGET_ENV_VARS = (
 
 def _refine_one_segment(video_path: str, seg: OffsetSegment, index: int, tmp_dir: Path,
                          min_confidence: float,
-                         abort_event: threading.Event | None = None) -> OffsetSegment:
+                         abort_event: threading.Event | None = None,
+                         syncnet_deadline: float | None = None) -> OffsetSegment:
     """The per-segment work `refine_piecewise_segments_with_syncnet` farms
     out to a worker: cut this segment's own sub-clip, run SyncNet on it,
     and translate the result into an `OffsetSegment`. Factored out as its
@@ -704,11 +720,28 @@ def _refine_one_segment(video_path: str, seg: OffsetSegment, index: int, tmp_dir
     hits that timeout, sets `abort_event` before returning so later
     segments (sequential) or already-dispatched ones (concurrent) get the
     same fast skip.
+
+    `syncnet_deadline`, independently of `abort_event`: if this request's
+    shared SyncNet time budget (see `pipeline.run_fix_pipeline`) is
+    already used up by earlier segments/attempts even though none of them
+    individually timed out, skips the same way. Otherwise, whatever time
+    *is* left is passed to `estimate_syncnet_offset` as this segment's own
+    ceiling, not a fresh full per-call default: several segments each
+    getting the full default is exactly how multiple individually-
+    on-budget calls can still add up to far more wall time than the
+    request as a whole should take.
     """
     if abort_event is not None and abort_event.is_set():
         return OffsetSegment(seg.start_s, seg.end_s, None, None, "undetermined")
 
     from syncsentry.lipsync.syncnet_offset import SyncNetUnavailable, estimate_syncnet_offset
+
+    syncnet_kwargs = {}
+    if syncnet_deadline is not None:
+        remaining_s = syncnet_deadline - time.monotonic()
+        if remaining_s <= 0:
+            return OffsetSegment(seg.start_s, seg.end_s, None, None, "undetermined")
+        syncnet_kwargs["timeout_s"] = remaining_s
 
     ffmpeg = _require_binary("ffmpeg")
     sub_clip = str(tmp_dir / f"segment_{index}.mp4")
@@ -728,7 +761,7 @@ def _refine_one_segment(video_path: str, seg: OffsetSegment, index: int, tmp_dir
         return OffsetSegment(seg.start_s, seg.end_s, None, None, "undetermined")
 
     try:
-        est = estimate_syncnet_offset(sub_clip)
+        est = estimate_syncnet_offset(sub_clip, **syncnet_kwargs)
     except (SyncNetUnavailable, ValueError):
         return OffsetSegment(seg.start_s, seg.end_s, None, None, "undetermined")
     except RuntimeError:
@@ -752,7 +785,8 @@ def _refine_one_segment(video_path: str, seg: OffsetSegment, index: int, tmp_dir
 def _refine_segments_concurrently(video_path: str, segments: list[OffsetSegment],
                                    trusted_indices: list[int], tmp_dir: Path,
                                    min_confidence: float | None,
-                                   abort_event: threading.Event | None = None) -> dict[int, OffsetSegment]:
+                                   abort_event: threading.Event | None = None,
+                                   syncnet_deadline: float | None = None) -> dict[int, OffsetSegment]:
     """Runs `_refine_one_segment` for every trusted-segment index, in
     parallel rather than one at a time.
 
@@ -762,6 +796,11 @@ def _refine_segments_concurrently(video_path: str, segments: list[OffsetSegment]
     branch, workers already dispatched before it trips still run to
     completion (there's no way to cancel a running thread), but every
     call not yet started skips its own doomed attempt.
+
+    `syncnet_deadline` is also forwarded to every call unchanged (each
+    call computes its own remaining time from it independently); see
+    `_refine_one_segment`'s docstring for why this matters even when
+    `abort_event` never trips.
 
     Safe: each call operates on its own sub-clip file (`segment_{i}.mp4`,
     distinct per index) and its own `SyncNetInstance`/temp working
@@ -786,7 +825,8 @@ def _refine_segments_concurrently(video_path: str, segments: list[OffsetSegment]
     n_workers = max(1, min(len(trusted_indices), MAX_REFINE_WORKERS))
 
     if n_workers == 1:
-        return {i: _refine_one_segment(video_path, segments[i], i, tmp_dir, min_confidence, abort_event)
+        return {i: _refine_one_segment(video_path, segments[i], i, tmp_dir, min_confidence,
+                                        abort_event, syncnet_deadline)
                 for i in trusted_indices}
 
     threads_per_worker = max(1, (os.cpu_count() or n_workers) // n_workers)
@@ -801,7 +841,7 @@ def _refine_segments_concurrently(video_path: str, segments: list[OffsetSegment]
         with ThreadPoolExecutor(max_workers=n_workers) as pool:
             futures = {
                 pool.submit(_refine_one_segment, video_path, segments[i], i, tmp_dir,
-                            min_confidence, abort_event): i
+                            min_confidence, abort_event, syncnet_deadline): i
                 for i in trusted_indices
             }
             for future in as_completed(futures):

@@ -182,7 +182,7 @@ def test_refine_segments_concurrently_maps_each_result_back_to_its_own_index(mon
 
     seen_indices = []
 
-    def fake_refine_one(video_path, seg, index, tmp_dir, min_confidence, abort_event=None):
+    def fake_refine_one(video_path, seg, index, tmp_dir, min_confidence, abort_event=None, syncnet_deadline=None):
         seen_indices.append(index)
         # Deliberately encode the input segment's own offset into the
         # output so a mixed-up index would produce a mismatched value.
@@ -207,7 +207,7 @@ def test_refine_segments_concurrently_single_segment_skips_thread_pool(monkeypat
     segments = [OffsetSegment(0.0, 10.0, 111.0, 0.9, "trusted", n_chunks=1)]
     called_from_main_thread = []
 
-    def fake_refine_one(video_path, seg, index, tmp_dir, min_confidence, abort_event=None):
+    def fake_refine_one(video_path, seg, index, tmp_dir, min_confidence, abort_event=None, syncnet_deadline=None):
         called_from_main_thread.append(threading.current_thread() is threading.main_thread())
         return OffsetSegment(seg.start_s, seg.end_s, offset_ms=1.0, confidence=0.9, status="trusted", n_chunks=1)
 
@@ -233,7 +233,7 @@ def test_refine_segments_concurrently_restores_env_vars_even_after_a_worker_rais
     sentinel = "__syncsentry_test_sentinel__"
     monkeypatch.setenv(_THREAD_BUDGET_ENV_VARS[0], sentinel)
 
-    def fake_refine_one_raises(video_path, seg, index, tmp_dir, min_confidence, abort_event=None):
+    def fake_refine_one_raises(video_path, seg, index, tmp_dir, min_confidence, abort_event=None, syncnet_deadline=None):
         raise RuntimeError("simulated worker failure")
 
     monkeypatch.setattr(piecewise_offset, "_refine_one_segment", fake_refine_one_raises)

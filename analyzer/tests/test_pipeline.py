@@ -209,7 +209,7 @@ def test_pipeline_uses_piecewise_result_when_available(tmp_path, monkeypatch):
     )
 
     def fake_maybe_fix_piecewise(video_path, corrected_video_path, av_threshold_ms,
-                                  av_min_confidence, syncnet_min_confidence):
+                                  av_min_confidence, syncnet_min_confidence, syncnet_deadline=None):
         Path(corrected_video_path).write_bytes(Path(video_path).read_bytes())
         return canned
 
@@ -231,6 +231,42 @@ def test_pipeline_uses_piecewise_result_when_available(tmp_path, monkeypatch):
     assert av_issue.segments == canned.segments
     assert (tmp_path / "out" / "report.json").exists()
     assert "piecewise" in (tmp_path / "out" / "report.txt").read_text()
+
+
+def test_pipeline_skips_piecewise_path_when_syncnet_budget_too_small(tmp_path, monkeypatch):
+    """Regression test: the piecewise path's own classical pre-check scans
+    the whole clip before any SyncNet call runs, and isn't bounded by
+    `syncnet_deadline` at all (see `PIECEWISE_MIN_SYNCNET_BUDGET_S`'s
+    docstring in pipeline.py: measured directly at 24s on its own for a
+    ~60s clip). When the configured per-call SyncNet timeout is too small
+    to plausibly afford that pre-check plus a real refinement attempt,
+    `_maybe_fix_piecewise` must not even be called, so the single-global
+    path (fast, bounded) is the only one that ever runs a whole clip
+    scan.
+    """
+    import syncsentry.pipeline as pipeline_mod
+
+    spec = FixtureSpec(duration_s=8.0, period_s=2.0, pulse_ms=80, offset_ms=0.0)
+    video = generate_fixture(tmp_path / "clean.mkv", spec)
+
+    monkeypatch.setattr(pipeline_mod.syncnet_offset, "SYNCNET_TIMEOUT_S", 15.0)
+    monkeypatch.setattr(pipeline_mod, "PIECEWISE_MIN_SYNCNET_BUDGET_S", 45.0)
+
+    piecewise_called = []
+
+    def fake_maybe_fix_piecewise(*args, **kwargs):
+        piecewise_called.append(True)
+        raise AssertionError(
+            "piecewise path must not be attempted when the configured SyncNet "
+            "budget is too small to afford its own classical pre-check")
+
+    monkeypatch.setattr(pipeline_mod, "_maybe_fix_piecewise", fake_maybe_fix_piecewise)
+
+    summary = run_fix_pipeline(video, tmp_path / "out", use_syncnet=True)
+
+    assert not piecewise_called
+    av_issue = next(i for i in summary.issues if i.name == "A/V sync")
+    assert av_issue.method != "piecewise"
 
 
 def test_maybe_fix_piecewise_backs_out_when_confirmed_segments_agree(tmp_path, monkeypatch):
@@ -259,7 +295,7 @@ def test_maybe_fix_piecewise_backs_out_when_confirmed_segments_agree(tmp_path, m
         return PiecewiseResult(is_piecewise=True, segments=noisy_pre_check_segments,
                                 video_duration_s=30.0, n_chunks_evaluated=3, n_chunks_confident=3)
 
-    def fake_refine(video_path, segments, min_confidence=None, abort_event=None):
+    def fake_refine(video_path, segments, min_confidence=None, abort_event=None, syncnet_deadline=None):
         # SyncNet refinement overrides the noisy classical numbers with
         # its own; all three happen to agree on the same real offset.
         return [
@@ -276,7 +312,7 @@ def test_maybe_fix_piecewise_backs_out_when_confirmed_segments_agree(tmp_path, m
 
     def fake_detect_av_offset(video_path, av_threshold_ms, use_syncnet, syncnet_min_confidence,
                                av_min_confidence, use_mtdvocalist=False, recenter_large_offsets=True,
-                               max_analyze_duration_s=None):
+                               max_analyze_duration_s=None, syncnet_deadline=None):
         return pipeline_mod._AVDetection(0.0, 8.0, "in_sync", 0.3, "syncnet", None)
 
     monkeypatch.setattr("syncsentry.lipsync.piecewise_offset.detect_piecewise_offsets",
@@ -313,7 +349,7 @@ def test_maybe_fix_piecewise_keeps_piecewise_path_when_segments_genuinely_disagr
         return PiecewiseResult(is_piecewise=True, segments=pre_check_segments,
                                 video_duration_s=20.0, n_chunks_evaluated=2, n_chunks_confident=2)
 
-    def fake_refine(video_path, segments, min_confidence=None, abort_event=None):
+    def fake_refine(video_path, segments, min_confidence=None, abort_event=None, syncnet_deadline=None):
         return [
             OffsetSegment(0.0, 10.0, 310.0, 8.0, "trusted"),
             OffsetSegment(10.0, 20.0, -505.0, 8.0, "trusted"),

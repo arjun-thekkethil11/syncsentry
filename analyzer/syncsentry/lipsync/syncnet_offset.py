@@ -499,6 +499,20 @@ def _run_face_track_crop(video_path: str, data_dir: Path, reference: str) -> Non
     work may keep running in the background even after this raises;
     that's an acceptable tradeoff for what is meant as a rare safety net
     on an already-slow host, not the common path.
+
+    Deliberately not `with ThreadPoolExecutor(...) as pool:` here: that
+    context manager's own `__exit__` calls `shutdown(wait=True)`, which
+    blocks until the abandoned worker thread actually finishes before
+    letting any exception raised inside the `with` block (including the
+    `RuntimeError` below) propagate any further. That silently defeats
+    the entire point of `.result(timeout=...)` above: on a genuinely
+    hung/slow call, the caller would still end up waiting for the full,
+    unbounded duration anyway, just finding out about it later, via a
+    less clear error path, after paying the identical wait. Explicit
+    `shutdown(wait=False)` in `finally` releases the pool's own
+    bookkeeping without waiting for that thread, so a timeout here
+    actually returns to the caller at `SYNCNET_TIMEOUT_S`, not whenever
+    the abandoned work happens to finish.
     """
     min_track = _adaptive_min_track(video_path)
     run_pipeline = _get_run_pipeline_module()
@@ -516,7 +530,8 @@ def _run_face_track_crop(video_path: str, data_dir: Path, reference: str) -> Non
     )
     run_pipeline._fill_derived_dirs(opt)
 
-    with ThreadPoolExecutor(max_workers=1) as pool:
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
         future = pool.submit(run_pipeline.run_face_track_pipeline, opt)
         try:
             future.result(timeout=SYNCNET_TIMEOUT_S)
@@ -531,6 +546,8 @@ def _run_face_track_crop(video_path: str, data_dir: Path, reference: str) -> Non
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr if isinstance(exc.stderr, str) else ""
             raise RuntimeError(f"SyncNet face-tracking stage failed:\n{stderr[-4000:]}") from exc
+    finally:
+        pool.shutdown(wait=False)
 
 
 def _mouth_motion_speaking_mask(crop_file: Path, n_frames: int) -> np.ndarray:
@@ -766,7 +783,7 @@ def _largest_agreeing_cluster(windows: list[SyncNetWindowResult],
     return best
 
 
-def estimate_syncnet_offset(video_path: str, vshift: int = 15, frame_rate: float = 25.0,
+def _estimate_syncnet_offset_uncapped(video_path: str, vshift: int = 15, frame_rate: float = 25.0,
                              in_sync_threshold_ms: float = 40.0, window_s: float = 1.0,
                              min_window_confidence: float = DEFAULT_SYNCNET_MIN_CONFIDENCE,
                              cluster_tolerance_frames: int = 2,
@@ -828,3 +845,77 @@ def estimate_syncnet_offset(video_path: str, vshift: int = 15, frame_rate: float
 
     return SyncNetEstimate(offset_ms=offset_ms, confidence=confidence, direction=direction,
                             n_tracks=len(tracks), n_confident_windows=n_confident_windows)
+
+
+def estimate_syncnet_offset(*args, timeout_s: float | None = None, **kwargs) -> SyncNetEstimate:
+    """Thin wrapper around `_estimate_syncnet_offset_uncapped` that bounds
+    the *entire* call (not just one internal stage) to `timeout_s` if
+    given, else `SYNCNET_TIMEOUT_S` (the process-wide default from
+    `SYNCSENTRY_SYNCNET_TIMEOUT_S`), when either is set.
+
+    Why this wrapper exists rather than relying on `_run_face_track_crop`'s
+    own timeout alone: that inner timeout only covers the S3FD
+    face-tracking step. Two other stages run around it, on their own,
+    unbounded: the wide-range mouth-motion recenter seed
+    (`_maybe_recenter_for_large_offset`, called *before* face-tracking,
+    scans the whole source clip with its own face detector) and the
+    SyncNet CNN scoring pass itself (`SyncNetInstance.evaluate()`, called
+    once per detected face track, *after* face-tracking). Measured
+    directly against a real ~60s talking-head clip on a CPU-constrained
+    host, the inner timeout alone was not enough: the request still ran
+    well past a minute because the time was going into these other
+    stages, not the one stage that had a ceiling. Wrapping the whole call
+    here means it doesn't matter which internal stage turns out to be
+    slow on a given host/clip; the one number a caller configures
+    (`SYNCSENTRY_SYNCNET_TIMEOUT_S`, or `timeout_s` below) bounds the
+    whole thing end to end.
+
+    `timeout_s` (default `None`, meaning "use the module-wide
+    `SYNCNET_TIMEOUT_S` default"): lets a caller managing a request-wide
+    SyncNet time *budget* across several calls (see
+    `pipeline._remaining_syncnet_budget_s`/`piecewise_offset.
+    refine_piecewise_segments_with_syncnet`) pass this specific call's
+    own *remaining* share of that budget instead of always getting a
+    fresh full default. `<= 0` raises immediately, the same as any other
+    timeout here, without even starting the call: a budget already fully
+    spent by earlier attempts in the same request should not buy this one
+    a first attempt of its own.
+
+    Raises the same `RuntimeError` `_run_face_track_crop` already raises
+    on its own timeout, so every existing caller's exception handling
+    (fall back to the coarse detector, trip the piecewise abort signal,
+    etc.) needs no changes to also cover this.
+
+    Neither `timeout_s` nor `SYNCNET_TIMEOUT_S` set (both `None`, e.g.
+    local/dev use with the env var unset): no wrapping at all, identical
+    behavior to calling `_estimate_syncnet_offset_uncapped` directly,
+    since the whole point is a deployment-configurable ceiling, not a
+    change to default behavior.
+    """
+    effective_timeout = timeout_s if timeout_s is not None else SYNCNET_TIMEOUT_S
+    if effective_timeout is None:
+        return _estimate_syncnet_offset_uncapped(*args, **kwargs)
+    if effective_timeout <= 0:
+        raise RuntimeError(
+            "SyncNet estimation skipped: this request's shared SyncNet time budget "
+            "(SYNCSENTRY_SYNCNET_TIMEOUT_S) was already used up by an earlier attempt"
+        )
+
+    # Not `with ThreadPoolExecutor(...) as pool:`: see the near-identical
+    # comment on `_run_face_track_crop` above. Its `__exit__` would block
+    # on `shutdown(wait=True)` until the abandoned call actually finishes,
+    # which defeats this wrapper's entire purpose the same way it would
+    # have defeated that function's.
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = pool.submit(_estimate_syncnet_offset_uncapped, *args, **kwargs)
+        try:
+            return future.result(timeout=effective_timeout)
+        except _FutureTimeoutError as exc:
+            raise RuntimeError(
+                f"SyncNet estimation exceeded the {effective_timeout:.0f}s budget "
+                f"(SYNCSENTRY_SYNCNET_TIMEOUT_S); this host is likely too CPU-constrained "
+                f"to run it on this clip in a reasonable time"
+            ) from exc
+    finally:
+        pool.shutdown(wait=False)
