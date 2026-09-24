@@ -24,6 +24,16 @@ cd webapp && npm install && npm run dev    # frontend
 
 See [`SETUP.md`](SETUP.md) for full install steps.
 
+The webapp fills the wait (detection + fixing isn't instant) with facts about
+the uploaded asset and general A/V-sync trivia instead of a bare spinner, then
+shows a before/after preview of the result so nothing has to be taken on
+faith:
+
+<p>
+  <img src="docs/images/webapp-processing.png" alt="Processing view with a rotating fact about the uploaded asset" width="420">
+  <img src="docs/images/webapp-results.png" alt="Results view with a before/after preview of the detected fix" width="420">
+</p>
+
 ## Project layout
 
 ```
