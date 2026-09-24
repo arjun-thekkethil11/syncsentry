@@ -9,7 +9,7 @@ Most sync tools assume one global offset for the whole file. Real content does n
 1. **Face and speech detection.** Faces are tracked with S3FD, and speech activity with Silero VAD, to find windows where someone is actually talking on screen.
 2. **Offset detection.** A pretrained lip-sync model (SyncNet) scores how well the audio and mouth movement line up at different offsets, inside each window. A lighter cross-correlation detector runs first as a coarse pass and to cover a wider offset range.
 3. **Piecewise correction.** If a video does not fit a single global offset, it is split into independently-verified segments, and each one gets its own correction. Segments that cannot be confidently verified are left untouched and reported as such, instead of guessing.
-4. **Verification.** After a fix is applied, the corrected file is re-checked with the same detector. A result is only reported as fixed if the residual offset actually measures near zero.
+4. **Verification.** After a fix is applied, the corrected file is re-checked with the same detector. A result is only reported as fixed if the residual offset actually measures near zero. If confidence is too low to trust in the first place, nothing is applied automatically either — a preview of the candidate correction is rendered instead, so it can be checked by eye/ear rather than trusted on a bare confidence number.
 
 ## Results
 
