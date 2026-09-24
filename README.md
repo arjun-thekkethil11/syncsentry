@@ -2,20 +2,31 @@
 
 Detects and fixes audio/video sync drift in video files, using lip motion and speech, not captions or timestamps.
 
+<p>
+  <img src="docs/images/webapp-processing.png" alt="Processing view with a rotating fact about the uploaded asset" width="420">
+  <img src="docs/images/webapp-results.png" alt="Results view with a before/after preview of the detected fix" width="420">
+</p>
+
+*While it's working (this takes a bit, sync detection isn't instant), it keeps you occupied with facts about your video instead of a bare spinner. When it's done, it shows you the before and after side by side, so you never have to just take its word for it.*
+
 Most sync tools assume one global offset for the whole file. Real content does not always work that way: a compilation of clips can have a different offset in every clip, and some clips can drift over time instead of staying constant. SyncSentry treats this as the general case, not an edge case.
 
 ## How it works
 
-1. **Face and speech detection.** Faces are tracked with S3FD, and speech activity with Silero VAD, to find windows where someone is actually talking on screen.
-2. **Offset detection.** A pretrained lip-sync model (SyncNet) scores how well the audio and mouth movement line up at different offsets, inside each window. A lighter cross-correlation detector runs first as a coarse pass and to cover a wider offset range.
-3. **Piecewise correction.** If a video does not fit a single global offset, it is split into independently-verified segments, and each one gets its own correction. Segments that cannot be confidently verified are left untouched and reported as such, instead of guessing.
-4. **Verification.** After a fix is applied, the corrected file is re-checked with the same detector. A result is only reported as fixed if the residual offset actually measures near zero. If confidence is too low to trust in the first place, nothing is applied automatically either — a preview of the candidate correction is rendered instead, so it can be checked by eye/ear rather than trusted on a bare confidence number.
+In plain terms: it watches the video the way a person would, and it won't tell you something is fixed unless it can prove it to itself first.
+
+1. **It figures out who's talking, and when.** It tracks faces on screen and listens for speech, so it only pays attention to the moments that actually matter for sync — a silent shot of a landscape has nothing to check. *(Face tracking via S3FD, speech detection via Silero VAD — both existing, published models, not something trained from scratch for this.)*
+2. **It measures how far off the lips and the voice are.** For each of those moments, it checks how well the mouth movements match the audio at a range of possible timing offsets, and narrows in on the one that actually fits. *(A pretrained lip-sync model, SyncNet, does the fine-grained scoring; a cheaper pass runs first to cover large offsets quickly.)*
+3. **It doesn't assume the whole video has one single problem.** A compilation or a heavily-edited video can be out of sync differently in every clip, or drift worse over time. Instead of forcing one number onto the entire file, it splits the video and fixes each part on its own — and if a part can't be confidently fixed, it's left alone and flagged, not silently guessed at.
+4. **It checks its own work before calling anything "fixed."** After applying a correction, it re-measures the result the same way it measured the problem. Something is only ever reported as fixed once that re-check actually comes back clean. And if it isn't confident enough in its own answer to apply it automatically, it still won't guess — it renders a preview of what it *would* do, so a person can watch/listen and decide.
 
 ## Results
 
-Evaluated on a held-out benchmark of synthetic clips with known, injected offsets (not used to tune the detector). Methodology, generation scripts, and current numbers are in [`analyzer/scripts/blind_benchmark/`](analyzer/scripts/blind_benchmark/); run `run_benchmark.py` to reproduce them on your own machine.
+Graded the way you'd grade against an answer key, not by trusting itself: clips are taken and their sync is deliberately broken by an exact, known amount, then SyncSentry is checked against that exact number. These clips are kept separate from anything used while building the detector, so the score reflects how it performs on content it hasn't seen, not memorization. Methodology, generation scripts, and current numbers are in [`analyzer/scripts/blind_benchmark/`](analyzer/scripts/blind_benchmark/); anyone can run `run_benchmark.py` and reproduce the same numbers themselves.
 
 ## Try it
+
+For anyone who wants to run it rather than just look at the screenshots above:
 
 ```bash
 uvicorn syncsentry.api:app --port 8000     # backend, from analyzer/
@@ -23,16 +34,6 @@ cd webapp && npm install && npm run dev    # frontend
 ```
 
 See [`SETUP.md`](SETUP.md) for full install steps.
-
-The webapp fills the wait (detection + fixing isn't instant) with facts about
-the uploaded asset and general A/V-sync trivia instead of a bare spinner, then
-shows a before/after preview of the result so nothing has to be taken on
-faith:
-
-<p>
-  <img src="docs/images/webapp-processing.png" alt="Processing view with a rotating fact about the uploaded asset" width="420">
-  <img src="docs/images/webapp-results.png" alt="Results view with a before/after preview of the detected fix" width="420">
-</p>
 
 ## Project layout
 
