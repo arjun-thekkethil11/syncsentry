@@ -36,7 +36,7 @@ import subprocess
 import sys
 import tempfile
 import threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from concurrent.futures import TimeoutError as _FutureTimeoutError
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -732,13 +732,31 @@ def estimate_syncnet_tracks(video_path: str, vshift: int = 15, window_s: float =
         # a no-op addition then.
         pre_shift_frames = -pre_shift_ms / (1000.0 / frame_rate)
 
-        opt = argparse.Namespace(batch_size=BATCH_SIZE, vshift=vshift,
-                                  tmp_dir=str(data_dir / "pytmp"), reference=reference)
         s = _get_syncnet_instance()
-
         window_frames = max(int(round(window_s * frame_rate)), 1)
-        results = []
-        for track_index, crop_file in enumerate(crop_files):
+
+        # Each track's `evaluate()` call is the pipeline's other dominant
+        # cost (a full CNN forward pass over the whole crop, ~3-5s per
+        # track on CPU) besides S3FD face detection above, and tracks are
+        # otherwise fully independent: distinct source crop file in, one
+        # (offset, confidence, dist) out, no shared mutable state on `s`
+        # itself (`evaluate()` only touches `self.__S__`, called
+        # eval()/no_grad-only, so concurrent forward passes on the same
+        # loaded model are safe on CPU). The one real hazard is
+        # `opt.tmp_dir/opt.reference`: `evaluate()` deletes and recreates
+        # that exact directory for its own per-call frame/audio
+        # extraction, so two tracks sharing one `reference` string would
+        # race on the same path. Giving each track its own `reference`
+        # (a distinct subdirectory under the same `tmp_dir`) removes that
+        # hazard without changing anything `evaluate()` itself does.
+        # Bounded by `SYNCSENTRY_MAX_REFINE_WORKERS` (already the
+        # project's existing knob for "how many concurrent CNN forward
+        # passes may this host run at once", shared with `piecewise_
+        # offset.py`'s own per-segment refinement) rather than a second,
+        # separate env var for the same underlying resource question.
+        def _evaluate_one(track_index: int, crop_file) -> SyncNetTrackResult:
+            opt = argparse.Namespace(batch_size=BATCH_SIZE, vshift=vshift,
+                                      tmp_dir=str(data_dir / "pytmp"), reference=f"{reference}_{track_index}")
             offset, conf, dist = s.evaluate(opt, videofile=str(crop_file))
 
             speaking_mask = _active_speaker_mask(crop_file, n_frames=dist.shape[0], gate_mode=gate_mode)
@@ -752,11 +770,22 @@ def estimate_syncnet_tracks(video_path: str, vshift: int = 15, window_s: float =
                                          confidence=w.confidence)
                     for w in windows
                 ]
-            results.append(SyncNetTrackResult(
+            return SyncNetTrackResult(
                 offset_frames=int(offset) + round(pre_shift_frames), confidence=float(conf), n_frames=len(dist),
                 windows=windows,
-            ))
-        return results
+            )
+
+        if len(crop_files) == 1:
+            return [_evaluate_one(0, crop_files[0])]
+
+        from syncsentry.lipsync.piecewise_offset import MAX_REFINE_WORKERS
+        max_workers = max(1, min(MAX_REFINE_WORKERS, len(crop_files)))
+        results: list[SyncNetTrackResult | None] = [None] * len(crop_files)
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_evaluate_one, i, cf): i for i, cf in enumerate(crop_files)}
+            for future in as_completed(futures):
+                results[futures[future]] = future.result()
+        return results  # type: ignore[return-value]
 
 
 def _largest_agreeing_cluster(windows: list[SyncNetWindowResult],
