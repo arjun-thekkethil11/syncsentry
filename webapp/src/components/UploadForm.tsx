@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { FileDrop } from "./FileDrop";
 import type { FixOptions } from "../api/types";
 
@@ -21,9 +21,24 @@ export function UploadForm({ onSubmit, disabled }: UploadFormProps) {
   const [captions, setCaptions] = useState<File | null>(null);
   const [options, setOptions] = useState<FixOptions>(DEFAULT_OPTIONS);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [videoPreviewUrl, setVideoPreviewUrl] = useState<string | null>(null);
 
   const isZip = video?.name.toLowerCase().endsWith(".zip");
   const canSubmit = video !== null && !disabled;
+
+  // Quick visual confirmation of what was actually selected/dropped,
+  // before spending 30s-2min running detection on it. Zips aren't
+  // previewable here (the video is only extracted server-side), so this
+  // stays null for those.
+  useEffect(() => {
+    if (!video || isZip) {
+      setVideoPreviewUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(video);
+    setVideoPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [video, isZip]);
 
   return (
     <form
@@ -46,6 +61,15 @@ export function UploadForm({ onSubmit, disabled }: UploadFormProps) {
           Zip detected. SyncSentry will extract it and look for a video and optional captions
           inside.
         </p>
+      )}
+
+      {videoPreviewUrl && (
+        <video
+          key={videoPreviewUrl}
+          src={videoPreviewUrl}
+          controls
+          className="w-full max-h-72 rounded-lg border border-white/10 bg-black"
+        />
       )}
 
       {!isZip && (

@@ -1,21 +1,42 @@
 import { useEffect, useState } from "react";
+import { FactsCarousel } from "./FactsCarousel";
+import { buildAssetFacts, buildFactsPlaylist, readVideoMetrics } from "../lib/videoFacts";
 
 interface ProcessingViewProps {
   useSyncnet: boolean;
+  videoFile: File | null;
   onCancel: () => void;
 }
 
 /** The pipeline runs as one blocking request, so there is no real progress
  * percentage. This shows an elapsed-time counter and the current stage
- * instead of a fake progress bar. */
-export function ProcessingView({ useSyncnet, onCancel }: ProcessingViewProps) {
+ * instead of a fake progress bar, plus a rotating carousel of facts about
+ * the uploaded asset (and general A/V-sync trivia) so the wait isn't just
+ * a bare spinner. */
+export function ProcessingView({ useSyncnet, videoFile, onCancel }: ProcessingViewProps) {
   const [elapsedS, setElapsedS] = useState(0);
+  const [facts, setFacts] = useState<string[]>([]);
 
   useEffect(() => {
     const start = Date.now();
     const id = setInterval(() => setElapsedS(Math.floor((Date.now() - start) / 1000)), 1000);
     return () => clearInterval(id);
   }, []);
+
+  useEffect(() => {
+    if (!videoFile) {
+      setFacts(buildFactsPlaylist([]));
+      return;
+    }
+    let cancelled = false;
+    readVideoMetrics(videoFile).then((metrics) => {
+      if (cancelled) return;
+      setFacts(buildFactsPlaylist(buildAssetFacts(videoFile, metrics)));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [videoFile]);
 
   const stage = !useSyncnet
     ? "Extracting audio and video signals..."
@@ -43,12 +64,13 @@ export function ProcessingView({ useSyncnet, onCancel }: ProcessingViewProps) {
       <p className="text-2xl font-mono tabular-nums text-brand-300 mb-1">
         {String(Math.floor(elapsedS / 60)).padStart(2, "0")}:{String(elapsedS % 60).padStart(2, "0")}
       </p>
-      <p className="text-xs text-slate-600 mb-6">
+      <p className="text-xs text-slate-600 mb-2">
         {useSyncnet ? "Typically 30 to 120 seconds" : "Usually a few seconds"}
       </p>
+      <FactsCarousel facts={facts} />
       <button
         onClick={onCancel}
-        className="text-sm text-slate-500 hover:text-rose-400 transition-colors"
+        className="mt-6 text-sm text-slate-500 hover:text-rose-400 transition-colors"
       >
         Cancel
       </button>

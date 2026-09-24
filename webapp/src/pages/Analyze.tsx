@@ -7,8 +7,8 @@ import type { FixOptions, FixResponse } from "../api/types";
 
 type ViewState =
   | { kind: "idle" }
-  | { kind: "processing"; useSyncnet: boolean }
-  | { kind: "done"; result: FixResponse }
+  | { kind: "processing"; useSyncnet: boolean; video: File }
+  | { kind: "done"; result: FixResponse; video: File }
   | { kind: "error"; message: string };
 
 export function Analyze() {
@@ -18,10 +18,10 @@ export function Analyze() {
   const handleSubmit = async (video: File, captions: File | null, options: FixOptions) => {
     const controller = new AbortController();
     abortRef.current = controller;
-    setState({ kind: "processing", useSyncnet: options.useSyncnet });
+    setState({ kind: "processing", useSyncnet: options.useSyncnet, video });
     try {
       const result = await runFix(video, captions, options, controller.signal);
-      setState({ kind: "done", result });
+      setState({ kind: "done", result, video });
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") {
         setState({ kind: "idle" });
@@ -51,7 +51,7 @@ export function Analyze() {
       {state.kind === "idle" && <UploadForm onSubmit={handleSubmit} />}
 
       {state.kind === "processing" && (
-        <ProcessingView useSyncnet={state.useSyncnet} onCancel={handleCancel} />
+        <ProcessingView useSyncnet={state.useSyncnet} videoFile={state.video} onCancel={handleCancel} />
       )}
 
       {state.kind === "error" && (
@@ -67,7 +67,9 @@ export function Analyze() {
         </div>
       )}
 
-      {state.kind === "done" && <ResultsPanel result={state.result} onReset={handleReset} />}
+      {state.kind === "done" && (
+        <ResultsPanel result={state.result} inputVideoFile={state.video} onReset={handleReset} />
+      )}
     </div>
   );
 }

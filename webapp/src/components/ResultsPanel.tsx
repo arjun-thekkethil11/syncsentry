@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { FixResponse } from "../api/types";
 import { downloadUrl, triggerDownload } from "../api/client";
 import { IssueCard } from "./IssueCard";
@@ -6,6 +6,12 @@ import { StatusBadge } from "./StatusBadge";
 
 interface ResultsPanelProps {
   result: FixResponse;
+  // The original `File` the user uploaded, kept around by `Analyze` (not
+  // re-fetched from the server) purely so this panel can render an
+  // in-browser preview of it without a round trip. `null` if for some
+  // reason the caller doesn't have it; the "before" side of the
+  // comparison degrades gracefully in that case.
+  inputVideoFile: File | null;
   onReset: () => void;
 }
 
@@ -42,14 +48,60 @@ function handleDownloadClick(path: string) {
   };
 }
 
-export function ResultsPanel({ result, onReset }: ResultsPanelProps) {
+function VideoSlot({ label, tone, url }: { label: string; tone: "neutral" | "good" | "warn"; url: string | null }) {
+  const labelClass =
+    tone === "good" ? "text-emerald-400" : tone === "warn" ? "text-amber-400" : "text-slate-500";
+  return (
+    <div>
+      <p className={`text-xs mb-2 ${labelClass}`}>{label}</p>
+      {url ? (
+        <video src={url} controls className="w-full aspect-video rounded-lg border border-white/10 bg-black" />
+      ) : (
+        <div className="aspect-video rounded-lg border border-white/10 bg-black/40 flex items-center justify-center text-xs text-slate-600 px-4 text-center">
+          Not available
+        </div>
+      )}
+    </div>
+  );
+}
+
+export function ResultsPanel({ result, inputVideoFile, onReset }: ResultsPanelProps) {
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [inputPreviewUrl, setInputPreviewUrl] = useState<string | null>(null);
+
+  // Object URLs are cheap (no re-encoding, just a reference into the
+  // already-in-memory File) but must be revoked or they leak for the
+  // life of the tab; tying creation/cleanup to `inputVideoFile` identity
+  // keeps exactly one alive at a time.
+  useEffect(() => {
+    if (!inputVideoFile) {
+      setInputPreviewUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(inputVideoFile);
+    setInputPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [inputVideoFile]);
+
   const headline = overallHeadline(result);
-  const hasDownload = Boolean(result.download_urls.corrected_video || result.download_urls.corrected_captions);
+  const correctedUrl = result.download_urls.corrected_video;
   const previewUrl = result.download_urls.av_sync_preview;
+  const fixedApplied = result.issues.some((i) => i.status === "fixed");
+  const hasDownload = Boolean(correctedUrl || result.download_urls.corrected_captions);
+
   // The issue this preview's offset/direction actually came from, so the
-  // label above the player can show real numbers instead of a bare video.
+  // copy below can show real numbers instead of a bare video.
   const previewIssue = result.issues.find((i) => i.name === "A/V sync" && i.status === "undetermined");
+
+  // What to show as the "second" video in the before/after comparison.
+  // Never the same clip twice: when nothing changed and there's no
+  // low-confidence candidate either, the right slot stays empty rather
+  // than showing an identical copy of the original.
+  const secondVideo: { url: string; label: string; tone: "good" | "warn" } | null = previewUrl
+    ? { url: downloadUrl(previewUrl), label: "Candidate preview (unverified)", tone: "warn" }
+    : fixedApplied && correctedUrl
+      ? { url: downloadUrl(correctedUrl), label: "Corrected", tone: "good" }
+      : null;
 
   return (
     <div className="space-y-6">
@@ -66,11 +118,11 @@ export function ResultsPanel({ result, onReset }: ResultsPanelProps) {
 
         {hasDownload && (
           <div className="flex flex-wrap items-center gap-3 mt-5">
-            {result.download_urls.corrected_video && (
+            {correctedUrl && (
               <a
-                href={downloadUrl(result.download_urls.corrected_video)}
+                href={downloadUrl(correctedUrl)}
                 download
-                onClick={handleDownloadClick(result.download_urls.corrected_video)}
+                onClick={handleDownloadClick(correctedUrl)}
                 className="rounded-lg bg-brand-500 hover:bg-brand-400 text-white text-sm font-medium px-5 py-2.5 transition-colors"
               >
                 ⬇ Download corrected video
@@ -89,45 +141,49 @@ export function ResultsPanel({ result, onReset }: ResultsPanelProps) {
           </div>
         )}
         {!hasDownload && !previewUrl && (
-          <p className="text-sm text-slate-400 mt-4">
-            No file was changed. See below for why.
-          </p>
+          <p className="text-sm text-slate-400 mt-4">No file was changed. See below for why.</p>
         )}
       </div>
 
-      {previewUrl && (
-        <div className="rounded-xl border border-amber-500/30 bg-amber-500/[0.04] p-6">
-          <p className="text-amber-300 font-medium mb-1">
-            Not confident enough to fix automatically &mdash; but here's the candidate
-          </p>
-          <p className="text-sm text-slate-400 leading-relaxed mb-4">
-            {previewIssue?.detected_offset_ms != null
-              ? `The detector's best guess is a ${previewIssue.detected_offset_ms > 0 ? "+" : ""}${Math.round(
-                  previewIssue.detected_offset_ms,
-                )}ms offset, but its own confidence (${previewIssue.confidence?.toFixed(2)}) was below the ` +
-                `trust threshold (${previewIssue.min_confidence?.toFixed(2)}), so nothing was applied ` +
-                `automatically. Watch/listen below `
-              : "Watch/listen below "}
-            and decide for yourself whether it looks right &mdash; no confidence number, from any detector,
-            is a substitute for actually checking.
-          </p>
-          <video
-            key={previewUrl}
-            src={downloadUrl(previewUrl)}
-            controls
-            className="w-full rounded-lg border border-white/10 bg-black mb-4"
-          />
-          <div className="flex flex-wrap items-center gap-3">
-            <a
-              href={downloadUrl(previewUrl)}
-              download
-              onClick={handleDownloadClick(previewUrl)}
-              className="rounded-lg bg-amber-500/90 hover:bg-amber-400 text-slate-950 text-sm font-medium px-5 py-2.5 transition-colors"
-            >
-              ⬇ Download this candidate correction
-            </a>
-            <span className="text-xs text-slate-500">Unverified &mdash; only keep it if it looks right to you</span>
+      {(inputPreviewUrl || secondVideo) && (
+        <div className="rounded-xl border border-white/10 bg-white/[0.02] p-6">
+          <p className="text-sm font-medium text-slate-200 mb-4">Before / After</p>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
+            <VideoSlot label="Original" tone="neutral" url={inputPreviewUrl} />
+            <VideoSlot
+              label={secondVideo?.label ?? "Already in sync"}
+              tone={secondVideo?.tone ?? "good"}
+              url={secondVideo?.url ?? null}
+            />
           </div>
+
+          {previewUrl && (
+            <>
+              <p className="text-xs text-amber-300/80 mt-4 leading-relaxed">
+                {previewIssue?.detected_offset_ms != null
+                  ? `The detector's best guess is a ${previewIssue.detected_offset_ms > 0 ? "+" : ""}${Math.round(
+                      previewIssue.detected_offset_ms,
+                    )}ms offset, but its own confidence (${previewIssue.confidence?.toFixed(2)}) was below the ` +
+                    `trust threshold (${previewIssue.min_confidence?.toFixed(2)}), so nothing was applied ` +
+                    `automatically. `
+                  : ""}
+                Watch/listen to both above and decide for yourself whether the candidate looks
+                right &mdash; no confidence number, from any detector, is a substitute for actually
+                checking.
+              </p>
+              <div className="flex flex-wrap items-center gap-3 mt-4">
+                <a
+                  href={downloadUrl(previewUrl)}
+                  download
+                  onClick={handleDownloadClick(previewUrl)}
+                  className="rounded-lg bg-amber-500/90 hover:bg-amber-400 text-slate-950 text-sm font-medium px-5 py-2.5 transition-colors"
+                >
+                  ⬇ Download this candidate correction
+                </a>
+                <span className="text-xs text-slate-500">Only keep it if it looks right to you</span>
+              </div>
+            </>
+          )}
         </div>
       )}
 
