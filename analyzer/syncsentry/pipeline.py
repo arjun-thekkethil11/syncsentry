@@ -529,6 +529,14 @@ def run_fix_pipeline(video_path: str | Path, out_dir: str | Path,
 
     summary = SyncFixSummary(asset_name=video_path.name)
     corrected_video_path = out_dir / f"{video_path.stem}.corrected{video_path.suffix}"
+    # Only ever written by `_fix_single_global_offset`'s low-confidence
+    # branch, and only when it has a real numeric candidate offset to
+    # render (see that function for why). Checked for existence below,
+    # after the fact, rather than threading a bool back through
+    # `IssueSummary`: whether the file got written is already its own
+    # unambiguous signal, and this keeps `IssueSummary` itself free of a
+    # field that's really just plumbing for this one caller.
+    preview_video_path = out_dir / f"{video_path.stem}.preview{video_path.suffix}"
 
     # --- Step 0: piecewise pre-check ---
     # Only attempted with SyncNet both requested and actually installed:
@@ -584,12 +592,14 @@ def run_fix_pipeline(video_path: str | Path, out_dir: str | Path,
     else:
         # --- Step 1-3: A/V sync (single global offset) ---
         summary.issues.append(_fix_single_global_offset(
-            video_path, corrected_video_path, av_threshold_ms, av_min_confidence,
+            video_path, corrected_video_path, preview_video_path, av_threshold_ms, av_min_confidence,
             use_syncnet, syncnet_min_confidence, use_mtdvocalist,
             syncnet_deadline=syncnet_deadline,
         ))
 
     summary.output_files["corrected_video"] = str(corrected_video_path)
+    if preview_video_path.exists():
+        summary.output_files["av_sync_preview"] = str(preview_video_path)
 
     # --- Step 4-6: captions (measured against the CORRECTED video) ---
     if captions_path is not None:
@@ -640,7 +650,8 @@ def run_fix_pipeline(video_path: str | Path, out_dir: str | Path,
     return summary
 
 
-def _fix_single_global_offset(video_path: Path, corrected_video_path: Path, av_threshold_ms: float,
+def _fix_single_global_offset(video_path: Path, corrected_video_path: Path, preview_video_path: Path,
+                               av_threshold_ms: float,
                                av_min_confidence: float, use_syncnet: bool, syncnet_min_confidence: float,
                                use_mtdvocalist: bool, syncnet_deadline: float | None = None) -> IssueSummary:
     """The A/V sync detect/fix/verify logic for the single-global-offset
@@ -658,11 +669,47 @@ def _fix_single_global_offset(video_path: Path, corrected_video_path: Path, av_t
         # honest answer. This case is most common on real dialogue/
         # talking-head content, where the confidence signal is weaker.
         corrected_video_path.write_bytes(video_path.read_bytes())
+
+        # Still render the candidate correction as a *preview*, distinct
+        # from `corrected_video_path` (which stays an honest, unmodified
+        # passthrough): this is cheap (`fix_av_offset` is a trim-based
+        # shift, not another detection pass) and gives the caller an
+        # actual video to watch instead of a bare number to trust or not.
+        # This exists because a confidence threshold, however carefully
+        # chosen, is still one fixed number applied blindly to every
+        # asset: some genuinely-correct detections on some content will
+        # always legitimately score below it (see this function's whole
+        # docstring, and `syncnet_offset.py`'s `n_confident_windows`,
+        # for why raw confidence varies so much by content). The honest
+        # fix for that isn't asking the caller to guess a *lower* number
+        # for this one asset (functionally identical for them, just a
+        # worse UX and a slower feedback loop, since it re-runs
+        # detection from scratch), it's giving them the one piece of
+        # evidence a confidence score can never substitute for: what the
+        # actual corrected result looks/sounds like. See also
+        # `mtdvocalist_offset.py`: a second independent detector is
+        # *not* used to auto-decide this instead, because it isn't
+        # automatically more trustworthy (confirmed directly: on one
+        # real low-corroboration clip it confidently proposed a
+        # materially different, wrong offset), so no automated
+        # tie-breaker here is actually safer than a human glancing at
+        # the preview.
+        try:
+            fix_av_offset(video_path, preview_video_path, det.offset_ms)
+            preview_rendered = True
+        except Exception:
+            preview_rendered = False  # fail open: the passthrough above is still a valid response either way
+
         note = (f"low-confidence detection{method_tag}: raw estimate {det.offset_ms:+.0f}ms "
                 f"({det.direction}), confidence {det.confidence:.2f} (threshold {det.min_confidence:.2f}), "
-                f"too low to trust; not applied automatically. If your own check agrees with the "
-                f"direction, re-run with a lower confidence threshold to force it, but treat the "
-                f"result as unverified")
+                f"too low to trust; not applied automatically.")
+        if preview_rendered:
+            note += (" A preview of this candidate correction was rendered (av_sync_preview) - "
+                      "watch/listen to it and accept it manually if it looks right, rather than "
+                      "guessing a lower confidence threshold.")
+        else:
+            note += (" Re-run with a lower confidence threshold to force it if your own check "
+                      "agrees with the direction, but treat the result as unverified.")
         if det.fallback_note:
             note = f"{det.fallback_note}. {note}"
         return IssueSummary(

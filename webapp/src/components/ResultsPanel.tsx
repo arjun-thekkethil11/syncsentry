@@ -46,6 +46,10 @@ export function ResultsPanel({ result, onReset }: ResultsPanelProps) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const headline = overallHeadline(result);
   const hasDownload = Boolean(result.download_urls.corrected_video || result.download_urls.corrected_captions);
+  const previewUrl = result.download_urls.av_sync_preview;
+  // The issue this preview's offset/direction actually came from, so the
+  // label above the player can show real numbers instead of a bare video.
+  const previewIssue = result.issues.find((i) => i.name === "A/V sync" && i.status === "undetermined");
 
   return (
     <div className="space-y-6">
@@ -84,12 +88,48 @@ export function ResultsPanel({ result, onReset }: ResultsPanelProps) {
             )}
           </div>
         )}
-        {!hasDownload && (
+        {!hasDownload && !previewUrl && (
           <p className="text-sm text-slate-400 mt-4">
             No file was changed. See below for why.
           </p>
         )}
       </div>
+
+      {previewUrl && (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-500/[0.04] p-6">
+          <p className="text-amber-300 font-medium mb-1">
+            Not confident enough to fix automatically &mdash; but here's the candidate
+          </p>
+          <p className="text-sm text-slate-400 leading-relaxed mb-4">
+            {previewIssue?.detected_offset_ms != null
+              ? `The detector's best guess is a ${previewIssue.detected_offset_ms > 0 ? "+" : ""}${Math.round(
+                  previewIssue.detected_offset_ms,
+                )}ms offset, but its own confidence (${previewIssue.confidence?.toFixed(2)}) was below the ` +
+                `trust threshold (${previewIssue.min_confidence?.toFixed(2)}), so nothing was applied ` +
+                `automatically. Watch/listen below `
+              : "Watch/listen below "}
+            and decide for yourself whether it looks right &mdash; no confidence number, from any detector,
+            is a substitute for actually checking.
+          </p>
+          <video
+            key={previewUrl}
+            src={downloadUrl(previewUrl)}
+            controls
+            className="w-full rounded-lg border border-white/10 bg-black mb-4"
+          />
+          <div className="flex flex-wrap items-center gap-3">
+            <a
+              href={downloadUrl(previewUrl)}
+              download
+              onClick={handleDownloadClick(previewUrl)}
+              className="rounded-lg bg-amber-500/90 hover:bg-amber-400 text-slate-950 text-sm font-medium px-5 py-2.5 transition-colors"
+            >
+              ⬇ Download this candidate correction
+            </a>
+            <span className="text-xs text-slate-500">Unverified &mdash; only keep it if it looks right to you</span>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         {result.issues.map((issue) => (

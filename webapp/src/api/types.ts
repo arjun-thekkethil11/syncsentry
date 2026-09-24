@@ -54,6 +54,14 @@ export interface FixResponse {
   download_urls: {
     corrected_video?: string;
     corrected_captions?: string;
+    // Only present when an "A/V sync" issue came back `status:
+    // "undetermined"` with a real numeric `detected_offset_ms` (low
+    // detector confidence, not "no face/no evidence at all"): a candidate
+    // correction at that offset, rendered even though it wasn't confident
+    // enough to apply automatically. Exists so a human can actually watch
+    // it and decide, instead of guessing a lower `syncnetMinConfidence`
+    // and re-running the full (slow) detection pass hoping it looks right.
+    av_sync_preview?: string;
   };
 }
 

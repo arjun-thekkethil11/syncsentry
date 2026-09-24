@@ -96,6 +96,18 @@ def test_pipeline_does_not_confidently_fix_low_confidence_real_content(tmp_path)
     corrected = Path(summary.output_files["corrected_video"])
     assert corrected.read_bytes() == REAL_CLIP.read_bytes()
 
+    # A low-confidence detection still renders a *preview* candidate at
+    # the raw detected offset: not applied automatically (asserted above:
+    # `corrected_video` stays an untouched passthrough), but available so
+    # a human can actually watch/listen and decide, rather than only
+    # being told a number and a threshold it didn't clear. See
+    # `_fix_single_global_offset`'s low-confidence branch.
+    assert "av_sync_preview" in summary.output_files
+    preview = Path(summary.output_files["av_sync_preview"])
+    assert preview.is_file()
+    assert preview.read_bytes() != REAL_CLIP.read_bytes()  # an actual shift was applied, unlike corrected_video
+    assert "av_sync_preview" in av_issue.note
+
 
 @pytest.mark.skipif(not REAL_CLIP.exists(),
                      reason="real-content fixture not fetched, run analyzer/scripts/fetch_real_content.sh")
