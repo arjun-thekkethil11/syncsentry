@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FixResponse } from "../api/types";
 import { downloadUrl, triggerDownload } from "../api/client";
 import { IssueCard } from "./IssueCard";
@@ -15,10 +15,13 @@ interface ResultsPanelProps {
   onReset: () => void;
 }
 
-// Mirrors `summarizeIssue` at the whole-asset level. "resolved" only
-// means the backend's own `overall_status === "resolved"`; an
-// undetermined issue always makes this "needs attention".
-function overallHeadline(result: FixResponse): { text: string; tone: "good" | "warn" } {
+// Mirrors `summarizeIssue` at the whole-asset level, but with a third
+// "neutral" tone for the common, non-alarming case where nothing failed —
+// we just don't have enough evidence to auto-apply a change (with or
+// without a preview candidate to confirm). Only a genuine attempted-and-
+// failed fix earns the "warn" styling; that's the one case that's
+// actually asking the user to intervene.
+function overallHeadline(result: FixResponse, hasPreview: boolean): { text: string; tone: "good" | "warn" | "neutral" } {
   if (result.overall_status === "resolved") {
     const anyFixed = result.issues.some((i) => i.status === "fixed");
     return {
@@ -26,7 +29,14 @@ function overallHeadline(result: FixResponse): { text: string; tone: "good" | "w
       tone: "good",
     };
   }
-  return { text: "Needs your attention", tone: "warn" };
+  const anyNotFixed = result.issues.some((i) => i.status === "not_fixed");
+  if (anyNotFixed) {
+    return { text: "Attempted a fix, but couldn't verify it", tone: "warn" };
+  }
+  return {
+    text: hasPreview ? "Found a likely fix \u2014 please confirm" : "Inconclusive \u2014 review recommended",
+    tone: "neutral",
+  };
 }
 
 function filenameFromPath(path: string): string {
@@ -48,14 +58,32 @@ function handleDownloadClick(path: string) {
   };
 }
 
-function VideoSlot({ label, tone, url }: { label: string; tone: "neutral" | "good" | "warn"; url: string | null }) {
+function VideoSlot({
+  label,
+  tone,
+  url,
+  videoRef,
+  onPlay,
+}: {
+  label: string;
+  tone: "neutral" | "good" | "warn";
+  url: string | null;
+  videoRef?: (el: HTMLVideoElement | null) => void;
+  onPlay?: (el: HTMLVideoElement) => void;
+}) {
   const labelClass =
     tone === "good" ? "text-emerald-400" : tone === "warn" ? "text-amber-400" : "text-slate-500";
   return (
     <div>
       <p className={`text-xs mb-2 ${labelClass}`}>{label}</p>
       {url ? (
-        <video src={url} controls className="w-full aspect-video rounded-lg border border-white/10 bg-black" />
+        <video
+          src={url}
+          controls
+          ref={videoRef}
+          onPlay={(e) => onPlay?.(e.currentTarget)}
+          className="w-full aspect-video rounded-lg border border-white/10 bg-black"
+        />
       ) : (
         <div className="aspect-video rounded-lg border border-white/10 bg-black/40 flex items-center justify-center text-xs text-slate-600 px-4 text-center">
           Not available
@@ -83,11 +111,18 @@ export function ResultsPanel({ result, inputVideoFile, onReset }: ResultsPanelPr
     return () => URL.revokeObjectURL(url);
   }, [inputVideoFile]);
 
-  const headline = overallHeadline(result);
   const correctedUrl = result.download_urls.corrected_video;
   const previewUrl = result.download_urls.av_sync_preview;
-  const fixedApplied = result.issues.some((i) => i.status === "fixed");
-  const hasDownload = Boolean(correctedUrl || result.download_urls.corrected_captions);
+  const videoFixed = result.issues.some((i) => i.name === "A/V sync" && i.status === "fixed");
+  const captionsFixed = result.issues.some((i) => i.name.toLowerCase().includes("caption") && i.status === "fixed");
+  // `corrected_video` is emitted by the backend on every run (even an
+  // untouched passthrough), so its mere presence can't gate the primary
+  // download CTA — that would offer a "download corrected video" button
+  // for a file that was never actually changed. Only show it once an
+  // issue actually reports `status === "fixed"`.
+  const hasDownload = videoFixed || captionsFixed;
+  const hasPreview = Boolean(previewUrl);
+  const headline = overallHeadline(result, hasPreview);
 
   // The issue this preview's offset/direction actually came from, so the
   // copy below can show real numbers instead of a bare video.
@@ -98,10 +133,24 @@ export function ResultsPanel({ result, inputVideoFile, onReset }: ResultsPanelPr
   // low-confidence candidate either, the right slot stays empty rather
   // than showing an identical copy of the original.
   const secondVideo: { url: string; label: string; tone: "good" | "warn" } | null = previewUrl
-    ? { url: downloadUrl(previewUrl), label: "Candidate preview (unverified)", tone: "warn" }
-    : fixedApplied && correctedUrl
+    ? { url: downloadUrl(previewUrl), label: "Candidate fix (please confirm)", tone: "warn" }
+    : videoFixed && correctedUrl
       ? { url: downloadUrl(correctedUrl), label: "Corrected", tone: "good" }
       : null;
+
+  // Keep the two before/after videos mutually exclusive: starting one
+  // pauses the other, rather than letting both play (and both output
+  // audio) at once.
+  const videoElsRef = useRef<HTMLVideoElement[]>([]);
+  const registerVideo = (el: HTMLVideoElement | null) => {
+    videoElsRef.current = videoElsRef.current.filter((v) => v !== el);
+    if (el) videoElsRef.current.push(el);
+  };
+  const pauseOthers = (playing: HTMLVideoElement) => {
+    for (const v of videoElsRef.current) {
+      if (v !== playing && !v.paused) v.pause();
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -112,7 +161,7 @@ export function ResultsPanel({ result, inputVideoFile, onReset }: ResultsPanelPr
             <h2 className="text-xl font-semibold text-slate-100">{headline.text}</h2>
           </div>
           <StatusBadge tone={headline.tone}>
-            {headline.tone === "good" ? "resolved" : "attention needed"}
+            {headline.tone === "good" ? "resolved" : headline.tone === "warn" ? "attention needed" : "review"}
           </StatusBadge>
         </div>
 
@@ -149,38 +198,43 @@ export function ResultsPanel({ result, inputVideoFile, onReset }: ResultsPanelPr
         <div className="rounded-xl border border-white/10 bg-white/[0.02] p-6">
           <p className="text-sm font-medium text-slate-200 mb-4">Before / After</p>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
-            <VideoSlot label="Original" tone="neutral" url={inputPreviewUrl} />
+            <VideoSlot
+              label="Original"
+              tone="neutral"
+              url={inputPreviewUrl}
+              videoRef={registerVideo}
+              onPlay={pauseOthers}
+            />
             <VideoSlot
               label={secondVideo?.label ?? "Already in sync"}
               tone={secondVideo?.tone ?? "good"}
               url={secondVideo?.url ?? null}
+              videoRef={registerVideo}
+              onPlay={pauseOthers}
             />
           </div>
 
           {previewUrl && (
             <>
-              <p className="text-xs text-amber-300/80 mt-4 leading-relaxed">
+              <p className="text-xs text-slate-400 mt-4 leading-relaxed">
                 {previewIssue?.detected_offset_ms != null
-                  ? `The detector's best guess is a ${previewIssue.detected_offset_ms > 0 ? "+" : ""}${Math.round(
+                  ? `Best guess: a ${previewIssue.detected_offset_ms > 0 ? "+" : ""}${Math.round(
                       previewIssue.detected_offset_ms,
-                    )}ms offset, but its own confidence (${previewIssue.confidence?.toFixed(2)}) was below the ` +
-                    `trust threshold (${previewIssue.min_confidence?.toFixed(2)}), so nothing was applied ` +
-                    `automatically. `
+                    )}ms offset (confidence ${previewIssue.confidence?.toFixed(2)}, below the ` +
+                    `${previewIssue.min_confidence?.toFixed(2)} trust threshold, so it wasn't applied ` +
+                    `automatically). `
                   : ""}
-                Watch/listen to both above and decide for yourself whether the candidate looks
-                right &mdash; no confidence number, from any detector, is a substitute for actually
-                checking.
+                Play both clips above and keep this one only if it looks/sounds right to you.
               </p>
               <div className="flex flex-wrap items-center gap-3 mt-4">
                 <a
                   href={downloadUrl(previewUrl)}
                   download
                   onClick={handleDownloadClick(previewUrl)}
-                  className="rounded-lg bg-amber-500/90 hover:bg-amber-400 text-slate-950 text-sm font-medium px-5 py-2.5 transition-colors"
+                  className="rounded-lg border border-brand-500/40 bg-brand-500/10 hover:bg-brand-500/20 text-brand-200 text-sm font-medium px-5 py-2.5 transition-colors"
                 >
                   ⬇ Download this candidate correction
                 </a>
-                <span className="text-xs text-slate-500">Only keep it if it looks right to you</span>
               </div>
             </>
           )}
@@ -189,7 +243,7 @@ export function ResultsPanel({ result, inputVideoFile, onReset }: ResultsPanelPr
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         {result.issues.map((issue) => (
-          <IssueCard key={issue.name} issue={issue} />
+          <IssueCard key={issue.name} issue={issue} hasPreview={hasPreview && issue.name === "A/V sync"} />
         ))}
       </div>
 

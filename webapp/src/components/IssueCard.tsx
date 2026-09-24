@@ -7,16 +7,20 @@ import { summarizeIssue } from "../lib/summarize";
 
 interface IssueCardProps {
   issue: IssueReport;
+  // True when a renderable preview candidate exists for this issue (see
+  // `summarizeIssue`'s doc comment). Only ever true for the A/V sync
+  // issue in a low-confidence run.
+  hasPreview?: boolean;
 }
 
 const badgeTone = { good: "good", warn: "warn", neutral: "neutral" } as const;
 
-export function IssueCard({ issue }: IssueCardProps) {
+export function IssueCard({ issue, hasPreview = false }: IssueCardProps) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   // Always defer to the backend's own `status` field rather than
   // re-deriving a verdict here. The backend has the full context
   // (corroboration counts, etc.) needed to make this call correctly.
-  const summary = summarizeIssue(issue);
+  const summary = summarizeIssue(issue, hasPreview);
 
   return (
     <div className="rounded-xl border border-white/10 bg-white/[0.02] p-5">
@@ -32,7 +36,9 @@ export function IssueCard({ issue }: IssueCardProps) {
               ? "corrected"
               : issue.status === "not_fixed"
                 ? "not fixed"
-                : "unverified"}
+                : hasPreview
+                  ? "check candidate"
+                  : "inconclusive"}
         </StatusBadge>
       </div>
       <p className="text-sm text-slate-400 leading-relaxed">{summary.detail}</p>

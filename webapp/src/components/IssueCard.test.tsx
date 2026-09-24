@@ -71,14 +71,32 @@ describe("IssueCard plain-language result + badge", () => {
     });
     render(<IssueCard issue={issue} />);
     expect(screen.queryByText("synchronized")).not.toBeInTheDocument();
-    expect(screen.getByText("unverified")).toBeInTheDocument();
+    expect(screen.getByText("inconclusive")).toBeInTheDocument();
     // Plain-language headline must be visible by default, not buried
     // behind the technical details disclosure.
-    expect(screen.getByText("Unable to verify sync safely")).toBeInTheDocument();
-    expect(screen.getByText(/treat it as unverified/i)).toBeInTheDocument();
+    expect(screen.getByText("Inconclusive")).toBeInTheDocument();
+    expect(screen.getByText(/doesn't necessarily mean anything is wrong/i)).toBeInTheDocument();
 
     openTechnicalDetails();
     expect(screen.getByText(/uncorroborated near-zero detection/)).toBeInTheDocument();
+  });
+
+  it("softens the copy to 'please confirm' (not an alarm) when a preview candidate exists for an undetermined result", () => {
+    const issue = makeIssue({
+      status: "undetermined",
+      had_issue: false,
+      detected_offset_ms: 1640,
+      confidence: 2.57,
+      min_confidence: 3.0,
+      method: "syncnet",
+      note: "low-confidence detection [syncnet]: raw estimate +1640ms",
+    });
+    render(<IssueCard issue={issue} hasPreview />);
+    expect(screen.queryByText("synchronized")).not.toBeInTheDocument();
+    expect(screen.getByText("check candidate")).toBeInTheDocument();
+    expect(screen.getByText(/Found a likely 1640ms offset.*please confirm/)).toBeInTheDocument();
+    expect(screen.queryByText("inconclusive")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Unable to verify sync safely/)).not.toBeInTheDocument();
   });
 
   it("shows a plain-language 'corrected' headline with a residual offset behind details for status=fixed", () => {
@@ -121,7 +139,7 @@ describe("IssueCard plain-language result + badge", () => {
     expect(screen.getByText(/could not safely fix it/)).toBeInTheDocument();
   });
 
-  it("shows 'unverified' (never synchronized) when no matching caption/speech onsets were found", () => {
+  it("shows 'inconclusive' (never synchronized) when no matching caption/speech onsets were found", () => {
     const issue = makeIssue({
       name: "Captions",
       status: "undetermined",
@@ -132,7 +150,7 @@ describe("IssueCard plain-language result + badge", () => {
       unmatched_count: 5,
     });
     render(<IssueCard issue={issue} />);
-    expect(screen.getByText("unverified")).toBeInTheDocument();
+    expect(screen.getByText("inconclusive")).toBeInTheDocument();
     expect(screen.queryByText("synchronized")).not.toBeInTheDocument();
 
     openTechnicalDetails();

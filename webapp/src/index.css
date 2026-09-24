@@ -42,3 +42,14 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: #384270;
 }
+
+/* Drives the "time remaining" bar under each fact in <FactsCarousel>.
+   Re-keyed on every fact change so it always restarts from empty. */
+@keyframes fact-progress {
+  from {
+    width: 0%;
+  }
+  to {
+    width: 100%;
+  }
+}

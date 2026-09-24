@@ -20,8 +20,15 @@ const LEARNED_METHODS = new Set(["syncnet", "mtdvocalist"]);
  * Turns the backend's `status` field into a plain-language result.
  * Never says "in sync" or "synchronized" for anything other than
  * `status === "in_sync"`.
+ *
+ * `hasPreview` should be true when a renderable preview candidate exists
+ * for this issue (currently only possible for a low-confidence A/V sync
+ * result). It changes the `undetermined` copy from a generic "couldn't
+ * verify" warning to a calmer "here's our best guess, go take a look"
+ * message — the former reads as alarming even when we actually have a
+ * good, checkable answer sitting right there for the user to confirm.
  */
-export function summarizeIssue(issue: IssueReport): PlainSummary {
+export function summarizeIssue(issue: IssueReport, hasPreview = false): PlainSummary {
   const isCaptions = issue.name.toLowerCase().includes("caption");
   const analysisNote = isCaptions
     ? null
@@ -83,10 +90,19 @@ export function summarizeIssue(issue: IssueReport): PlainSummary {
       };
     case "undetermined":
     default:
+      if (hasPreview) {
+        const ms = issue.detected_offset_ms !== null ? Math.abs(Math.round(issue.detected_offset_ms)) : null;
+        return {
+          headline: ms !== null ? `Found a likely ${ms}ms offset \u2014 please confirm` : "Found a likely fix \u2014 please confirm",
+          detail: "The detector's confidence was below the trust threshold, so this wasn't applied automatically. A preview is ready below \u2014 take a quick look and keep it if it looks right.",
+          tone: "neutral",
+          analysisNote,
+        };
+      }
       return {
-        headline: "Unable to verify sync safely",
-        detail: "There was not enough reliable evidence to confirm this is in sync, or to confidently correct it. Treat it as unverified, not as fine.",
-        tone: "warn",
+        headline: "Inconclusive",
+        detail: "There wasn't enough reliable evidence either way. This is common on content a lip-motion model can't get a clear read on, and doesn't necessarily mean anything is wrong.",
+        tone: "neutral",
         analysisNote,
       };
   }
